@@ -1,0 +1,34 @@
+[production]
+[production.web]
+ips = ["126.231.21.4", "121.12.131.7"]
+chdir = "ansible"
+health_check = "curl --fail {{.Self.IP}}/health"
+provision = [
+	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
+]
+start = [
+	"ansible-playbook -i '{{.Self.IP}},' production_web.yml -t deploy -b"
+]
+
+[production.load_balancer]
+ips = ["122.123.15.3"]
+chdir = "ansible"
+health_check = "curl --fail {{.Self.IP}}/health"
+provision = [
+	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
+]
+start = [
+	"ansible-playbook -i '{{.Self.IP}},' production_loadbalancer.yml -t deploy -e 'web_ips={{ range .Web.IPs }}{{ . }},{{ end }}' -b"
+]
+
+[staging]
+[staging.web]
+ips = ["155.200.100.11"]
+chdir = "ansible"
+health_check = "curl --fail {{.Self.IP}}/health"
+provision = [
+	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
+]
+start = [
+	"ansible-playbook -i '{{.Self.IP}},' plays/production_web.yml -e '@host_vars/app.yml'"
+]
