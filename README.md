@@ -3,7 +3,7 @@
 Up is a single command to get your servers are up-and-running. You can think of
 `up` as a partial replacement for Kubernetes, Nomad, Docker Swarm, and other
 deployment tools. Unlike those other tools, `up` is extremely small, simple,
-and bug-free (or closer to it).
+and as a result, more reliable and less prone to bugs.
 
 ### Install
 
@@ -40,16 +40,14 @@ server's IP address from the generated `Upfile.lock` file.
 
 ### Features
 
-[x] Run arbitrary shell commands to provision, start, and check the health of
-    your servers
-[x] Define your system architecture in source control
-[x] Operate on individual environments, like production and staging
-[x] Provision servers once (and only once), automatically
-[x] Check the health of all servers before exiting
-[x] Perform dry runs to see what commands would be run for each IP address
-[ ] Concurrent deploys
-[ ] Rolling and blue-green deploys
-[ ] Pass in template variables via the `up` CLI
+- [x] Define your system architecture in source control
+- [x] Run arbitrary shell commands to provision, start, and check the health of
+      your servers
+- [x] Operate on individual environments, like production and staging
+- [x] Perform dry runs to check commands prior to running
+- [ ] Concurrent deploys
+- [ ] Rolling and blue-green deploys
+- [ ] Pass in template variables via the `up` CLI
 
 ### Non-Features
 
