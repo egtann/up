@@ -1,4 +1,4 @@
-// sup ensures a project's servers are deployed successfully in one command.
+// up ensures a project's servers are deployed successfully in one command.
 package main
 
 import (
@@ -10,7 +10,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/pkg/errors"
@@ -18,7 +18,7 @@ import (
 
 type configServer struct {
 	IP          string
-	Dir         string
+	Chdir       string
 	IPs         []string
 	Provision   []string
 	Start       []string
@@ -30,9 +30,10 @@ type lockEntry struct {
 }
 
 func main() {
-	// TODO flags: -c concurrent-deploy
-	// TODO flags: -v vars for passing in extra template data without it
-	// remaining in source, like a secret API key for a health check
+	// TODO flags: -e extra-vars file for passing in extra template data
+	// without it remaining in source, like a secret API key for a health
+	// check, or specific IPs for a blue-green deploy
+	// TODO flags: -v verbose
 
 	log.SetFlags(0)
 
@@ -95,7 +96,7 @@ func main() {
 			for k, v := range confEnv {
 				localConf[k] = v
 			}
-			ok, err := provision(localConf, ip, typ, fi, *dry)
+			ok, err := provision(localConf, ip, typ, *dry)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -135,7 +136,6 @@ func main() {
 func provision(
 	conf map[string]*configServer,
 	ip, typ string,
-	fi *os.File,
 	dry bool,
 ) (bool, error) {
 	// TODO Replace text.template data with Self/Type.IPs, etc.
@@ -156,18 +156,15 @@ func provision(
 		log.Printf("%s: provision: %s\n", typ, cmd)
 		if !dry {
 			c := exec.Command("sh", "-c", cmd)
-			c.Dir = conf[typ].Dir
+			c.Dir = conf[typ].Chdir
 			out, err := c.CombinedOutput()
 			if err != nil {
 				log.Println(string(out))
 				return false, errors.Wrap(err, "run cmd")
 			}
+			// TODO verbose flag
 			log.Println(string(out))
 		}
-	}
-	_, err := fi.WriteString(fmt.Sprintf("%s = \"%s\"\n", ip, typ))
-	if err != nil {
-		return false, errors.Wrap(err, "append to lockfile")
 	}
 	return start(conf, ip, typ, dry)
 }
@@ -193,7 +190,7 @@ func start(
 		log.Printf("%s: start: %s\n", typ, cmd)
 		if !dry {
 			c := exec.Command("sh", "-c", cmd)
-			c.Dir = filepath.Join(".", "ansible")
+			c.Dir = conf[typ].Chdir
 			out, err := c.CombinedOutput()
 			if err != nil {
 				log.Println(string(out))
@@ -226,13 +223,19 @@ func checkHealth(
 	if !dry {
 		// TODO ensure it passes 3 times in a row over several seconds
 		c := exec.Command("sh", "-c", cmd)
-		c.Dir = conf[typ].Dir
-		out, err := c.CombinedOutput()
-		if err != nil {
+		c.Dir = conf[typ].Chdir
+		const iterations = 3
+		for i := 0; i < iterations; i++ {
+			out, err := c.CombinedOutput()
+			if err != nil {
+				log.Println(string(out))
+				return false, errors.Wrap(err, "run cmd")
+			}
 			log.Println(string(out))
-			return false, errors.Wrap(err, "run cmd")
+			if i < iterations-1 {
+				time.Sleep(time.Second)
+			}
 		}
-		log.Println(string(out))
 	}
 	return true, nil
 }
