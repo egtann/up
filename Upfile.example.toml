@@ -39,3 +39,4 @@ start = [
 health_checks = [
 	"curl --fail {{.Self.IP}}/health"
 ]
+health_check_delay = 5

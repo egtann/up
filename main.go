@@ -19,11 +19,12 @@ import (
 )
 
 type configServer struct {
-	BaseDir     string `toml:"base_dir"`
-	IPs         []string
-	Provision   []string
-	Start       []string
-	HealthCheck []string `toml:"health_check"`
+	BaseDir          string `toml:"base_dir"`
+	IPs              []string
+	Provision        []string
+	Start            []string
+	HealthCheck      []string `toml:"health_check"`
+	HealthCheckDelay int      `toml:"health_check_delay"`
 
 	// ip is used internally, so it's unexported
 	ip string
@@ -55,9 +56,6 @@ func main() {
 	// TODO flags: -e extra-vars file for passing in extra template data
 	// without it remaining in source, like a secret API key for a health
 	// check, or specific IPs for a blue-green deploy
-	//
-	// TODO flags: -l limit to specific services, like just restart web,
-	// but do healthchecks across the board when finished
 
 	log.SetFlags(0)
 	rand.Seed(time.Now().Unix())
@@ -96,7 +94,7 @@ func main() {
 		}
 		if !conf.Flags.RollingDeploy {
 			for _, ip := range service.IPs {
-				batch1Size++
+				batch1Size += 2
 				batch1[ip] = append(batch1[ip], serviceType(typ))
 			}
 			continue
@@ -104,10 +102,10 @@ func main() {
 		rnd := rand.Intn(len(service.IPs))
 		for i, ip := range service.IPs {
 			if i == rnd {
-				batch1Size++
+				batch1Size += 2
 				batch1[ip] = append(batch1[ip], serviceType(typ))
 			} else {
-				batch2Size++
+				batch2Size += 2
 				batch2[ip] = append(batch2[ip], serviceType(typ))
 			}
 		}
@@ -195,7 +193,7 @@ func start(
 			return errors.Wrap(err, "start")
 		}
 	}
-	return checkHealth(conf, ip, typ)
+	return nil
 }
 
 func startOne(
@@ -332,6 +330,27 @@ func provisionBatch(
 			go func(ip string, typ serviceType) {
 				err := provision(c, ip, typ)
 				ch <- errors.Wrapf(err, "failed provision %s", ip)
+			}(ip, typ)
+		}
+	}
+
+	// Now that all services in this batch have started, check their
+	// health. This should check the health of all specified services for a
+	// given environment, even those not specified in the limit (to ensure
+	// the whole system works).
+	//
+	// If you'd like to check health only for specific servers, then
+	// comment out the others in your Upfile.
+	for ip, types := range batch {
+		for _, typ := range types {
+			go func(ip string, typ serviceType) {
+				if !conf.Flags.Dry {
+					delay := time.Duration(
+						conf.Services[typ].HealthCheckDelay)
+					time.Sleep(delay * time.Second)
+				}
+				err := checkHealth(conf, ip, typ)
+				ch <- errors.Wrapf(err, "failed check_health %s", ip)
 			}(ip, typ)
 		}
 	}
