@@ -47,7 +47,6 @@ type lockfileData map[string]map[string][]serviceType
 type configuration struct {
 	Services map[serviceType]*configServer
 	Flags    flags
-	Self     *configServer
 }
 
 // TODO: show example Upfiles working across windows and linux dev environments
@@ -159,8 +158,6 @@ func provisionOne(
 		return errors.Wrap(err, "parse template")
 	}
 	var byt []byte
-	conf.Self = conf.Services[typ]
-	conf.Self.ip = ip
 	buf := bytes.NewBuffer(byt)
 	if err = tmpl.Execute(buf, conf); err != nil {
 		return errors.Wrap(err, "execute template")
@@ -207,10 +204,6 @@ func startOne(
 		return errors.Wrap(err, "parse template")
 	}
 	var byt []byte
-	if conf.Self == nil {
-		conf.Self = conf.Services[typ]
-		conf.Self.ip = ip
-	}
 	buf := bytes.NewBuffer(byt)
 	if err = tmpl.Execute(buf, conf); err != nil {
 		return errors.Wrap(err, "execute template")
@@ -244,10 +237,6 @@ func checkHealthOne(
 		return errors.Wrap(err, "parse template")
 	}
 	var byt []byte
-	if conf.Self == nil {
-		conf.Self = conf.Services[typ]
-		conf.Self.ip = ip
-	}
 	buf := bytes.NewBuffer(byt)
 	if err = tmpl.Execute(buf, conf); err != nil {
 		return errors.Wrap(err, "execute template")
