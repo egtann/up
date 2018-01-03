@@ -19,7 +19,7 @@ use the `up` command to bring everything online. You can find an example
 
 Running `up` performs 3 tasks on each server:
 
-* Provision (once per IP)
+* Provision (once per IP/service combination)
 * Start
 * Check health
 
