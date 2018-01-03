@@ -12,6 +12,7 @@ health_check = [
 	"curl --fail {{.Self.IP}}/health",
 	"curl --fail -XPOST -d '{ \"msg\": \"health check\" }' {{.Self.IP}}/messages",
 ]
+health_check_delay = 5
 
 [production.load_balancer]
 ips = ["122.123.15.3"]
@@ -25,6 +26,7 @@ start = [
 health_checks = [
 	"curl --fail {{.Self.IP}}/health"
 ]
+health_check_delay = 3 
 
 [staging]
 [staging.web]

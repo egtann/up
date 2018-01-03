@@ -45,8 +45,8 @@ server's IP address from the generated `Upfile.lock` file.
       your servers
 - [x] Operate on individual environments, like production and staging
 - [x] Perform dry runs to check commands prior to running
-- [ ] Concurrent deploys
-- [ ] Rolling and blue-green deploys
+- [x] Concurrent deploys
+- [x] Rolling deploys
 - [ ] Pass in template variables via the `up` CLI
 
 ### Non-Features
