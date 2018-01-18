@@ -3,14 +3,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,36 +21,63 @@ import (
 	"github.com/pkg/errors"
 )
 
-type configServer struct {
-	BaseDir          string `toml:"base_dir"`
+type serviceConfig struct {
+	// CmdDir from which Provision, Update, and HealthCheck commands will
+	// run.
+	CmdDir           string `toml:"cmd_dir"`
 	IPs              []string
 	Provision        []string
-	Start            []string
+	Update           []string
 	HealthCheck      []string `toml:"health_check"`
 	HealthCheckDelay int      `toml:"health_check_delay"`
+	Serial           uint
+	VersionCheckURL  string
 
-	// ip is used internally, so it's unexported
-	ip string
+	// VersionCheckDir containing the service's source code. This directory
+	// will be checksummed if VersionCheck is defined. If VersionCheck is
+	// not defined, VersionCheckDir does nothing. If VersionCheck is
+	// defined, but VersionCheckDir is not, VersionCheckDir runs on the
+	// current directory. Hidden files and folders (i.e. those beginning
+	// with '.') are excluded from any checksum.
+	VersionCheckDir string
 }
 
 type flags struct {
-	Env           string
-	Upfile        string
-	Dry           bool
-	RollingDeploy bool
-	Verbose       bool
-	Force         bool
-	Limit         map[serviceType]struct{}
+	// Env is the environment which you wish to bring up, e.g. "staging" or
+	// "production"
+	Env string
+
+	// Upfile allows you to specify a different Upfile name. This is
+	// helpful when running across multiple operating systems or shells.
+	// For example, you may have Upfile.windows.toml and Upfile.linux.toml,
+	// or Upfile.bash.toml and Upfile.fish.toml.
+	Upfile string
+
+	// Dry run lists all commands that would be run without running them
+	Dry bool
+
+	// Verbose log output displays the output from commands run on each
+	// server
+	Verbose bool
+
+	// Force re-provisioning and updating for all servers, skipping version
+	// and health checks
+	Force bool
+
+	// Limit the changed services to those enumerated if the flag is
+	// provided
+	Limit map[serviceType]struct{}
 }
 
 type serviceType string
 
-type lockfileData map[string]map[string][]serviceType
-
 type configuration struct {
-	Services map[serviceType]*configServer
+	Services map[serviceType]*serviceConfig
 	Flags    flags
 }
+
+// batch maps a service to several groups of IPs
+type batch map[serviceType][][]string
 
 // TODO: show example Upfiles working across windows and linux dev environments
 // in readme
@@ -57,22 +87,17 @@ func main() {
 	// check, or specific IPs for a blue-green deploy
 
 	log.SetFlags(0)
-	rand.Seed(time.Now().Unix())
+	rand.Seed(time.Now().UnixNano())
 
 	flgs, err := parseFlags()
 	if err != nil {
 		log.Fatal(errors.Wrap(err, "parse flags"))
 	}
 
-	upfileData := map[string]map[serviceType]*configServer{}
+	upfileData := map[string]map[serviceType]*serviceConfig{}
 	if _, err = toml.DecodeFile(flgs.Upfile, &upfileData); err != nil {
 		log.Fatal(errors.Wrap(err, "decode toml"))
 	}
-	lockfile, ld, err := decodeLockfile("Upfile.lock")
-	if err != nil {
-		log.Fatal(errors.Wrap(err, "decode lockfile"))
-	}
-	defer lockfile.Close()
 
 	services, exists := upfileData[flgs.Env]
 	if !exists {
@@ -85,66 +110,56 @@ func main() {
 	conf := &configuration{Services: services, Flags: flgs}
 
 	// Multiple batches for rolling deploy
-	var batch1Size, batch2Size int
-	batch1, batch2 := map[string][]serviceType{}, map[string][]serviceType{}
-	for typ, service := range conf.Services {
-		if len(service.IPs) == 0 {
-			log.Fatal(fmt.Errorf("no ips for %s", typ))
-		}
-		if !conf.Flags.RollingDeploy {
-			for _, ip := range service.IPs {
-				batch1Size += 2
-				batch1[ip] = append(batch1[ip], serviceType(typ))
-			}
-			continue
-		}
-		rnd := rand.Intn(len(service.IPs))
-		for i, ip := range service.IPs {
-			if i == rnd {
-				batch1Size += 2
-				batch1[ip] = append(batch1[ip], serviceType(typ))
-			} else {
-				batch2Size += 2
-				batch2[ip] = append(batch2[ip], serviceType(typ))
-			}
-		}
+	batches, err := makeBatches(conf.Services)
+	if err != nil {
+		log.Fatal(errors.Wrap(err, "make batches"))
 	}
-	log.Println("provisioning batch 1: ", batch1)
-	ch := make(chan error, batch1Size)
-	provisionBatch(ch, conf, batch1, ld[conf.Flags.Env])
-	for i := 0; i < batch1Size; i++ {
-		if err = <-ch; err != nil {
-			log.Fatal(errors.Wrap(err, "provision batch 1"))
-		}
+	log.Println(batches)
+
+	// checksums maps each filepath to a sha256 checksum
+	checksums, err := calcChecksums(conf.Services)
+	if err != nil {
+		log.Fatal(errors.Wrap(err, "calc checksum"))
 	}
-	close(ch)
-	if batch2Size > 0 {
-		log.Println("provisioning batch 2: ", batch2)
-		ch = make(chan error, batch2Size)
-		provisionBatch(ch, conf, batch2, ld[conf.Flags.Env])
-		for i := 0; i < batch2Size; i++ {
-			if err = <-ch; err != nil {
-				log.Fatal(errors.Wrap(err, "provision batch 2"))
+
+	// Bring up each service type in parallel
+	done := make(chan bool, len(batches))
+	for typ, ipgroups := range batches {
+		go func(typ serviceType, ipgroups [][]string) {
+			for _, ips := range ipgroups {
+				log.Printf("provisioning batch %s %+v\n", typ, ips)
+
+				// Provision each batch of IPs concurrently
+				ch := make(chan error, len(ips))
+				provisionBatch(ch, conf, typ, ips, checksums)
+				for i := 0; i < len(ips); i++ {
+					if err = <-ch; err != nil {
+						log.Fatal(errors.Wrapf(err, "provision batch %d", i))
+					}
+				}
+				close(ch)
 			}
-		}
-		close(ch)
+			done <- true
+		}(typ, ipgroups)
 	}
-	if !flgs.Dry {
-		if err := updateLockfile(conf, ld, lockfile); err != nil {
-			log.Fatal(errors.Wrap(err, "update lockfile"))
-		}
+	for i := 0; i < len(batches); i++ {
+		<-done
 	}
 	log.Println("success")
 }
 
 // provision a machine as a specific class, e.g. "web" or "loadbalancer"
-func provision(conf *configuration, ip string, typ serviceType) error {
+func provision(
+	conf *configuration,
+	ip string,
+	typ serviceType,
+) error {
 	for _, cmd := range conf.Services[typ].Provision {
 		if err := provisionOne(conf, ip, typ, cmd); err != nil {
 			return errors.Wrap(err, "provision")
 		}
 	}
-	return start(conf, ip, typ)
+	return update(conf, ip, typ)
 }
 
 func provisionOne(
@@ -164,36 +179,38 @@ func provisionOne(
 	}
 	cmd = string(buf.Bytes())
 	log.Printf("[%s] %s: provision %s: %s\n", conf.Flags.Env, typ, ip, cmd)
-	if conf.Flags.Dry {
-		return nil
-	}
-	c := exec.Command("sh", "-c", cmd)
-	c.Dir = conf.Services[typ].BaseDir
-	out, err := c.CombinedOutput()
-	if err != nil {
-		log.Println(string(out))
-		return errors.Wrap(err, "run cmd")
-	}
-	if conf.Flags.Verbose {
-		log.Println(string(out))
+	if !conf.Flags.Dry {
+		c := exec.Command("sh", "-c", cmd)
+		srv := conf.Services[typ]
+		c.Dir = srv.CmdDir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("%s: %s", err, string(out))
+			return errors.Wrap(err, "run cmd")
+		}
+		if conf.Flags.Verbose {
+			log.Println(string(out))
+		}
+		delay := time.Duration(srv.HealthCheckDelay)
+		time.Sleep(delay * time.Second)
 	}
 	return nil
 }
 
-func start(
+func update(
 	conf *configuration,
 	ip string,
 	typ serviceType,
 ) error {
-	for _, cmd := range conf.Services[typ].Start {
-		if err := startOne(conf, ip, typ, cmd); err != nil {
-			return errors.Wrap(err, "start")
+	for _, cmd := range conf.Services[typ].Update {
+		if err := updateOne(conf, ip, typ, cmd); err != nil {
+			return errors.Wrap(err, "update")
 		}
 	}
 	return nil
 }
 
-func startOne(
+func updateOne(
 	conf *configuration,
 	ip string,
 	typ serviceType,
@@ -209,15 +226,15 @@ func startOne(
 		return errors.Wrap(err, "execute template")
 	}
 	cmd = string(buf.Bytes())
-	log.Printf("[%s] %s: start %s, %s\n", conf.Flags.Env, typ, ip, cmd)
+	log.Printf("[%s] %s: update %s, %s\n", conf.Flags.Env, typ, ip, cmd)
 	if conf.Flags.Dry {
 		return nil
 	}
 	c := exec.Command("sh", "-c", cmd)
-	c.Dir = conf.Services[typ].BaseDir
+	c.Dir = conf.Services[typ].CmdDir
 	out, err := c.CombinedOutput()
 	if err != nil {
-		log.Println(string(out))
+		err = fmt.Errorf("%s: %s", err, string(out))
 		return errors.Wrap(err, "run cmd")
 	}
 	if conf.Flags.Verbose {
@@ -231,156 +248,138 @@ func checkHealthOne(
 	ip string,
 	typ serviceType,
 	tmplCmd string,
-) error {
+) (bool, error) {
 	tmpl, err := template.New("").Parse(tmplCmd)
 	if err != nil {
-		return errors.Wrap(err, "parse template")
+		return false, errors.Wrap(err, "parse template")
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
 	if err = tmpl.Execute(buf, conf); err != nil {
-		return errors.Wrap(err, "execute template")
+		return false, errors.Wrap(err, "execute template")
 	}
 	cmd := string(buf.Bytes())
-	const iterations = 3
-	for i := 0; i < iterations; i++ {
+	const attempts = 3
+	var out []byte
+	for i := 0; i < attempts; i++ {
 		log.Printf("[%s] %s: check_health %s (%d): %s\n",
 			conf.Flags.Env, typ, ip, i+1, cmd)
 		if conf.Flags.Dry {
 			continue
 		}
 		c := exec.Command("sh", "-c", cmd)
-		c.Dir = conf.Services[typ].BaseDir
-		out, err := c.CombinedOutput()
-		if err != nil {
-			log.Println(string(out))
-			return errors.Wrap(err, "run cmd")
+		c.Dir = conf.Services[typ].CmdDir
+		out, err = c.CombinedOutput()
+		if err == nil {
+			break
 		}
 		if conf.Flags.Verbose {
-			log.Println(string(out))
+			log.Printf("%s: %s\n", err, string(out))
 		}
-		if i < iterations-1 {
-			time.Sleep(time.Second)
-		}
+		time.Sleep(time.Second)
 	}
-	return nil
+	if err != nil {
+		err = fmt.Errorf("%s: %s", err, string(out))
+		return false, errors.Wrap(err, "run cmd")
+	}
+	return true, nil
 }
 
 func checkHealth(
 	conf *configuration,
 	ip string,
 	typ serviceType,
-) error {
+) (bool, error) {
 	for _, cmd := range conf.Services[typ].HealthCheck {
-		if err := checkHealthOne(conf, ip, typ, cmd); err != nil {
-			return errors.Wrap(err, "check health")
+		ok, err := checkHealthOne(conf, ip, typ, cmd)
+		if err != nil || !ok {
+			return false, errors.Wrap(err, "check health")
 		}
 	}
-	return nil
+	return true, nil
+}
+
+func checkVersion(
+	conf *configuration,
+	ip string,
+	typ serviceType,
+	url string,
+	checksum []byte,
+) (bool, error) {
+	if !strings.HasPrefix(url, "/") {
+		url = "/" + url
+	}
+	_, err := http.NewRequest("GET", ip+url, nil)
+	if err != nil {
+		return false, errors.Wrap(err, "get version")
+	}
+	// TODO
+
+	log.Printf("same version found for %s, skipping\n", ip)
+	return true, nil
 }
 
 func provisionBatch(
 	ch chan error,
 	conf *configuration,
-	batch map[string][]serviceType,
-	lockfileEnv map[string][]serviceType,
+	typ serviceType,
+	ips []string,
+	checksums map[string][]byte,
 ) {
-	for ip, types := range batch {
-		c := copyConfig(conf)
-		if _, exists := lockfileEnv[ip]; exists {
-			for _, typ := range types {
-				if len(conf.Flags.Limit) > 0 {
-					_, exists := conf.Flags.Limit[typ]
-					if !exists {
-						ch <- nil
-						continue
-					}
-				}
-				go func(ip string, typ serviceType) {
-					var err error
-					if conf.Flags.Force {
-						err = provision(c, ip, typ)
-					} else {
-						err = start(c, ip, typ)
-					}
-					ch <- errors.Wrapf(err, "start %s", ip)
-				}(ip, typ)
+	for _, ip := range ips {
+		if len(conf.Flags.Limit) > 0 {
+			_, exists := conf.Flags.Limit[typ]
+			if !exists {
+				ch <- nil
+				continue
 			}
-			continue
 		}
-		for _, typ := range types {
-			if len(conf.Flags.Limit) > 0 {
-				_, exists := conf.Flags.Limit[typ]
-				if !exists {
-					ch <- nil
-					continue
+		go func(ip string, typ serviceType) {
+			// Check health. If needed, provision, then
+			// check health again (on delay)
+
+			// Then check version, and update if needed,
+			// then check health again (on delay)
+			ok, err := checkHealth(conf, ip, typ)
+			if err != nil {
+				ch <- errors.Wrapf(err,
+					"failed check_health %s", ip)
+				return
+			}
+			if !ok {
+				err = provision(conf, ip, typ)
+				if err != nil {
+					ch <- errors.Wrapf(err,
+						"failed provision %s", ip)
+					return
+				}
+				ok, err = checkHealth(conf, ip, typ)
+				if err != nil || !ok {
+					ch <- errors.Wrapf(err,
+						"failed health_check after provision %s", ip)
+					return
 				}
 			}
-			go func(ip string, typ serviceType) {
-				err := provision(c, ip, typ)
-				ch <- errors.Wrapf(err, "failed provision %s", ip)
-			}(ip, typ)
-		}
+			chk := checksums[conf.Services[typ].VersionCheckDir]
+			ul := conf.Services[typ].VersionCheckURL
+			ok, err = checkVersion(conf, ip, typ, ul, chk)
+			if err != nil {
+				ch <- errors.Wrapf(err,
+					"failed check_version %s", ip)
+				return
+			}
+			if ok {
+				ch <- nil
+				return
+			}
+		}(ip, typ)
 	}
-
-	// Now that all services in this batch have started, check their
-	// health. This should check the health of all specified services for a
-	// given environment, even those not specified in the limit (to ensure
-	// the whole system works).
-	//
-	// If you'd like to check health only for specific servers, then
-	// comment out the others in your Upfile.
-	for ip, types := range batch {
-		for _, typ := range types {
-			go func(ip string, typ serviceType) {
-				if !conf.Flags.Dry {
-					delay := time.Duration(
-						conf.Services[typ].HealthCheckDelay)
-					time.Sleep(delay * time.Second)
-				}
-				err := checkHealth(conf, ip, typ)
-				ch <- errors.Wrapf(err, "failed check_health %s", ip)
-			}(ip, typ)
-		}
-	}
-}
-
-func copyConfig(c *configuration) *configuration {
-	c2 := &configuration{
-		Flags:    c.Flags,
-		Services: map[serviceType]*configServer{},
-	}
-	for k, v := range c.Services {
-		c2.Services[k] = v
-	}
-	return c2
-}
-
-func decodeLockfile(
-	filename string,
-) (*os.File, map[string]map[string][]serviceType, error) {
-	ld := lockfileData{}
-	fi, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "open lockfile")
-	}
-	byt, err := ioutil.ReadAll(fi)
-	if err != nil {
-		fi.Close()
-		return nil, nil, errors.Wrap(err, "read lockfile")
-	}
-	if _, err = toml.Decode(string(byt), &ld); err != nil {
-		fi.Close()
-		return nil, nil, errors.Wrap(err, "decode lockfile")
-	}
-	return fi, ld, nil
 }
 
 func parseFlags() (flags, error) {
 	env := flag.String("e", "", "environment")
 	upfile := flag.String("u", "Upfile.toml", "path to upfile")
 	dry := flag.Bool("d", false, "dry run")
-	rollingDeploy := flag.Bool("r", true, "rolling deploy")
 	verbose := flag.Bool("v", false, "verbose output")
 	force := flag.Bool("f", false, "force provision")
 	limit := flag.String("l", "",
@@ -397,43 +396,19 @@ func parseFlags() (flags, error) {
 		}
 	}
 	flgs := flags{
-		Env:           *env,
-		Upfile:        *upfile,
-		Dry:           *dry,
-		RollingDeploy: *rollingDeploy,
-		Verbose:       *verbose,
-		Limit:         lim,
-		Force:         *force,
+		Env:     *env,
+		Upfile:  *upfile,
+		Dry:     *dry,
+		Verbose: *verbose,
+		Limit:   lim,
+		Force:   *force,
 	}
 	return flgs, nil
 }
 
-func updateLockfile(
-	conf *configuration,
-	ld map[string]map[string][]serviceType,
-	fi *os.File,
-) error {
-	if _, err := fi.Seek(0, 0); err != nil {
-		return errors.Wrap(err, "seek")
-	}
-	if err := fi.Truncate(0); err != nil {
-		return errors.Wrap(err, "truncate")
-	}
-	ld[conf.Flags.Env] = map[string][]serviceType{}
-	for typ, service := range conf.Services {
-		for _, ip := range service.IPs {
-			ld[conf.Flags.Env][ip] = append(ld[conf.Flags.Env][ip], typ)
-		}
-	}
-	if err := toml.NewEncoder(fi).Encode(ld); err != nil {
-		return errors.Wrap(err, "encode ips")
-	}
-	return nil
-}
-
 func validateLimits(
 	limits map[serviceType]struct{},
-	services map[serviceType]*configServer,
+	services map[serviceType]*serviceConfig,
 	env string,
 ) error {
 	for serviceName, _ := range limits {
@@ -443,4 +418,101 @@ func validateLimits(
 		}
 	}
 	return nil
+}
+
+func calcDirChecksum(dir string) ([]byte, error) {
+	files := []string{}
+	err := filepath.Walk(dir, func(pth string, info os.FileInfo, err error) error {
+		if strings.HasPrefix(info.Name(), ".") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		files = append(files, pth)
+		return err
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "walk filepath")
+	}
+	h := sha256.New()
+	for _, pth := range files {
+		fi, err := os.Open(pth)
+		if err != nil {
+			return nil, errors.Wrap(err, "open file")
+		}
+		if _, err = io.Copy(h, fi); err != nil {
+			fi.Close()
+			return nil, errors.Wrap(err, "copy file")
+		}
+		if err = fi.Close(); err != nil {
+			return nil, errors.Wrap(err, "close file")
+		}
+	}
+	return h.Sum(nil), nil
+}
+
+func randomizeOrder(ss []string) []string {
+	out := make([]string, len(ss))
+	perm := rand.Perm(len(ss))
+	for i, p := range perm {
+		out[i] = ss[p]
+	}
+	return out
+}
+
+func makeBatches(conf map[serviceType]*serviceConfig) (batch, error) {
+	batches := batch{}
+	for typ, service := range conf {
+		if len(service.IPs) == 0 {
+			return nil, fmt.Errorf("no ips for %s", typ)
+		}
+		service.IPs = randomizeOrder(service.IPs)
+		if service.Serial == 0 {
+			batches[typ] = [][]string{service.IPs}
+			continue
+		}
+		batchIdx := 0
+		max := int(service.Serial)
+		for _, ip := range service.IPs {
+			if len(batches[typ]) <= batchIdx {
+				bat := batches[typ]
+				batches[typ] = append(bat, []string{ip})
+			} else {
+				bat := batches[typ][batchIdx]
+				batches[typ][batchIdx] = append(bat, ip)
+			}
+			if len(batches[typ][batchIdx]) >= max {
+				batchIdx++
+			}
+		}
+	}
+	if len(batches) == 0 {
+		return nil, errors.New("empty batches, nothing to do")
+	}
+	return batches, nil
+}
+
+func calcChecksums(conf map[serviceType]*serviceConfig) (map[string][]byte, error) {
+	chks := map[string][]byte{}
+	for typ, service := range conf {
+		if service.VersionCheckURL == "" {
+			if service.VersionCheckDir != "" {
+				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckURL", typ)
+				continue
+			}
+		}
+		dir := service.VersionCheckDir
+		if dir == "" {
+			dir = "."
+		}
+		if _, exist := chks[dir]; !exist {
+			checksum, err := calcDirChecksum(dir)
+			if err != nil {
+				return nil, errors.Wrap(err, "calc dir checksum")
+			}
+			chks[dir] = checksum
+		}
+	}
+	return chks, nil
 }

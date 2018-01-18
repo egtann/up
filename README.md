@@ -13,14 +13,18 @@ $ go get github.com/egtann/up
 
 ### Usage
 
+Up extracts the logic of deployment best-practices into a cross-platform tool
+that can be used to deploy anything.
+
 You'll describe your server architecture in a single file (`Upfile.toml`), then
 use the `up` command to bring everything online. You can find an example
 `Upfile.toml` in this project.
 
-Running `up` performs 3 tasks on each server:
+Running `up` performs 4 tasks on each server:
 
-* Provision (once per IP/service combination)
-* Start
+* Provision and start
+* Update
+* Check version
 * Check health
 
 Since `up` does these tasks by running arbitrary shell commands defined in your
@@ -30,13 +34,13 @@ project-level `Upfile.toml` file, `up` works out-of-the-box with:
 * Ansible
 * Containers (Docker, rkt, LXC, etc.)
 * Bash scripts
-* And any other tools where you have IP-level control over your servers
+* And any other tools with command-line interfaces
 
 The only required flag for `up` is `-e`, which specifies the environment. Run
 `up -h` for additional usage info.
 
-Provisioning will only run once per IP. To force re-provisioning, delete the
-server's IP address from the generated `Upfile.lock` file.
+When run, `up` checks the health of each service, and provisions any that fail.
+Then it checks the version of each service, and updates any that have changed.
 
 ### Features
 
@@ -47,6 +51,11 @@ server's IP address from the generated `Upfile.lock` file.
 - [x] Perform dry runs to check commands prior to running
 - [x] Concurrent deploys
 - [x] Rolling deploys
+- [x] Agentless deploys
+- [x] Stateless. Up checks your infrastructure to determine its state on each
+      run, so nothing is ever out-of-date
+- [ ] Start an already-pushed service only if `up` detects changes in the
+      service's directory
 - [ ] Pass in template variables via the `up` CLI
 
 ### Non-Features
