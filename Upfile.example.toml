@@ -5,7 +5,7 @@ base_dir = "ansible"
 provision = [
 	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
 ]
-start = [
+update = [
 	"ansible-playbook -i '{{.Self.IP}},' production_web.yml -t deploy -b"
 ]
 health_check = [
@@ -13,6 +13,8 @@ health_check = [
 	"curl --fail -XPOST -d '{ \"msg\": \"health check\" }' {{.Self.IP}}/messages",
 ]
 health_check_delay = 5
+version_check_url = "{{.Self.IP}}/version"
+serial = 1
 
 [production.load_balancer]
 ips = ["122.123.15.3"]
@@ -20,13 +22,15 @@ base_dir = "ansible"
 provision = [
 	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
 ]
-start = [
-	"ansible-playbook -i '{{.Self.IP}},' production_loadbalancer.yml -t deploy -e 'web_ips={{ range .Web.IPs }}{{ . }},{{ end }}' -b"
+update = [
+	"ansible-playbook -i '{{.Self.IP}},' production_loadbalancer.yml -t deploy -e 'web_ips={{ range .Config.Services.Web.IPs }}{{ . }},{{ end }}' -b"
 ]
 health_checks = [
 	"curl --fail {{.Self.IP}}/health"
 ]
 health_check_delay = 3 
+version_check_url = "{{.Self.IP}}/version"
+serial = 1
 
 [staging]
 [staging.web]
@@ -35,10 +39,11 @@ chdir = "ansible"
 provision = [
 	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
 ]
-start = [
+update = [
 	"ansible-playbook -i '{{.Self.IP}},' plays/production_web.yml -e '@host_vars/app.yml'"
 ]
 health_checks = [
 	"curl --fail {{.Self.IP}}/health"
 ]
 health_check_delay = 5
+serial = 1

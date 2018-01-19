@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
@@ -40,6 +41,11 @@ type serviceConfig struct {
 	// current directory. Hidden files and folders (i.e. those beginning
 	// with '.') are excluded from any checksum.
 	VersionCheckDir string
+}
+
+type selfConfig struct {
+	Config *configuration
+	Self   struct{ IP string }
 }
 
 type flags struct {
@@ -114,7 +120,9 @@ func main() {
 	if err != nil {
 		log.Fatal(errors.Wrap(err, "make batches"))
 	}
-	log.Println(batches)
+	if conf.Flags.Verbose {
+		log.Printf("got batches: %s\n", batches)
+	}
 
 	// checksums maps each filepath to a sha256 checksum
 	checksums, err := calcChecksums(conf.Services)
@@ -127,7 +135,7 @@ func main() {
 	for typ, ipgroups := range batches {
 		go func(typ serviceType, ipgroups [][]string) {
 			for _, ips := range ipgroups {
-				log.Printf("provisioning batch %s %+v\n", typ, ips)
+				log.Printf("[%s] %s: provision batch: %s\n", conf.Flags.Env, typ, ips)
 
 				// Provision each batch of IPs concurrently
 				ch := make(chan error, len(ips))
@@ -159,7 +167,7 @@ func provision(
 			return errors.Wrap(err, "provision")
 		}
 	}
-	return update(conf, ip, typ)
+	return nil
 }
 
 func provisionOne(
@@ -174,7 +182,7 @@ func provisionOne(
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, conf); err != nil {
+	if err = tmpl.Execute(buf, addSelf(conf, ip)); err != nil {
 		return errors.Wrap(err, "execute template")
 	}
 	cmd = string(buf.Bytes())
@@ -222,7 +230,7 @@ func updateOne(
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, conf); err != nil {
+	if err = tmpl.Execute(buf, addSelf(conf, ip)); err != nil {
 		return errors.Wrap(err, "execute template")
 	}
 	cmd = string(buf.Bytes())
@@ -255,7 +263,7 @@ func checkHealthOne(
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, conf); err != nil {
+	if err = tmpl.Execute(buf, addSelf(conf, ip)); err != nil {
 		return false, errors.Wrap(err, "execute template")
 	}
 	cmd := string(buf.Bytes())
@@ -306,17 +314,35 @@ func checkVersion(
 	url string,
 	checksum []byte,
 ) (bool, error) {
+	if len(url) == 0 || len(checksum) == 0 {
+		return false, nil
+	}
 	if !strings.HasPrefix(url, "/") {
 		url = "/" + url
 	}
-	_, err := http.NewRequest("GET", ip+url, nil)
+	req, err := http.NewRequest("GET", ip+url, nil)
 	if err != nil {
 		return false, errors.Wrap(err, "get version")
 	}
-	// TODO
-
-	log.Printf("same version found for %s, skipping\n", ip)
-	return true, nil
+	client := &http.Client{Timeout: 60 * time.Second}
+	rsp, err := client.Do(req)
+	if err != nil {
+		return false, errors.Wrap(err, "make request")
+	}
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf(
+			"unexpected check_version response code %d, wanted 200",
+			rsp.StatusCode)
+	}
+	body, err := ioutil.ReadAll(rsp.Body)
+	if err != nil {
+		return false, errors.Wrap(err, "read resp body")
+	}
+	if string(body) == string(checksum) {
+		log.Printf("same version found for %s, skipping\n", ip)
+		return true, nil
+	}
+	return false, nil
 }
 
 func provisionBatch(
@@ -346,6 +372,7 @@ func provisionBatch(
 					"failed check_health %s", ip)
 				return
 			}
+			log.Println("CHECKED HEALTH", ip)
 			if !ok {
 				err = provision(conf, ip, typ)
 				if err != nil {
@@ -353,12 +380,14 @@ func provisionBatch(
 						"failed provision %s", ip)
 					return
 				}
+				log.Println("PROVISIONED", ip)
 				ok, err = checkHealth(conf, ip, typ)
 				if err != nil || !ok {
 					ch <- errors.Wrapf(err,
 						"failed health_check after provision %s", ip)
 					return
 				}
+				log.Println("CHECKED HEALTH (AFTER PROV)", ip)
 			}
 			chk := checksums[conf.Services[typ].VersionCheckDir]
 			ul := conf.Services[typ].VersionCheckURL
@@ -368,10 +397,14 @@ func provisionBatch(
 					"failed check_version %s", ip)
 				return
 			}
+			log.Println("CHECKED VERSION", ip)
 			if ok {
 				ch <- nil
 				return
 			}
+			err = update(conf, ip, typ)
+			log.Println("UPDATED", ip)
+			ch <- errors.Wrap(err, "update")
 		}(ip, typ)
 	}
 }
@@ -515,4 +548,12 @@ func calcChecksums(conf map[serviceType]*serviceConfig) (map[string][]byte, erro
 		}
 	}
 	return chks, nil
+}
+
+func addSelf(c *configuration, ip string) *selfConfig {
+	sc := &selfConfig{
+		Config: c,
+		Self:   struct{ IP string }{IP: ip},
+	}
+	return sc
 }
