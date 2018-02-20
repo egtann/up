@@ -1,7 +1,7 @@
 [production]
 [production.web]
 ips = ["126.231.21.4", "121.12.131.7"]
-base_dir = "ansible"
+cmd_dir = "ansible"
 provision = [
 	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
 ]
@@ -13,37 +13,69 @@ health_check = [
 	"curl --fail -XPOST -d '{ \"msg\": \"health check\" }' {{.Self.IP}}/messages",
 ]
 health_check_delay = 5
-version_check_url = "{{.Self.IP}}/version"
+version_check_path = "{{.Self.IP}}/version"
 serial = 1
 
 [production.load_balancer]
 ips = ["122.123.15.3"]
-base_dir = "ansible"
+cmd_dir = "ansible"
 provision = [
 	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
 ]
 update = [
-	"ansible-playbook -i '{{.Self.IP}},' production_loadbalancer.yml -t deploy -e 'web_ips={{ range .Config.Services.Web.IPs }}{{ . }},{{ end }}' -b"
+	"ansible-playbook -i '{{.Self.IP}},' production_loadbalancer.yml -t deploy -e 'web_ips={{ with (index .Config.Services \"web\") }}{{ range .IPs }}{{ . }},{{ end }}{{ end }}' -b"
 ]
-health_checks = [
+health_check = [
 	"curl --fail {{.Self.IP}}/health"
 ]
 health_check_delay = 3 
-version_check_url = "{{.Self.IP}}/version"
+version_check_path = "/version"
 serial = 1
 
 [staging]
 [staging.web]
 ips = ["155.200.100.11"]
-chdir = "ansible"
 provision = [
-	"ansible-playbook -i '{{.Self.IP}},' plays/bootstrap.yml -b"
+	"echo 'provision {{.Self.IP}}'"
 ]
 update = [
-	"ansible-playbook -i '{{.Self.IP}},' plays/production_web.yml -e '@host_vars/app.yml'"
+	"echo 'update {{.Self.IP}}'"
 ]
-health_checks = [
-	"curl --fail {{.Self.IP}}/health"
+health_check = [
+	"echo 'health {{.Self.IP}}'"
 ]
 health_check_delay = 5
+version_check_path = "/version"
+serial = 1
+
+[failhealth]
+[failhealth.web]
+ips = ["155.200.100.11"]
+provision = [
+	"exit 0"
+]
+update = [
+	"exit 0"
+]
+health_check = [
+	"exit 1"
+]
+health_check_delay = 5
+version_check_path = "/version"
+serial = 1
+
+[failupdate]
+[failupdate.web]
+ips = ["155.200.100.11"]
+provision = [
+	"exit 0"
+]
+update = [
+	"exit 1"
+]
+health_check = [
+	"exit 0"
+]
+health_check_delay = 5
+version_check_path = "/version"
 serial = 1
