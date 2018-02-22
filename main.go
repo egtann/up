@@ -23,12 +23,10 @@ import (
 )
 
 type serviceConfig struct {
-	// CmdDir from which Provision, Update, and HealthCheck commands will
-	// run.
+	// CmdDir from which Start and HealthCheck commands will run.
 	CmdDir           string `toml:"cmd_dir"`
 	IPs              []string
-	Provision        []string
-	Update           []string
+	Start            []string
 	HealthCheck      []string `toml:"health_check"`
 	HealthCheckDelay int      `toml:"health_check_delay"`
 	Serial           uint
@@ -65,10 +63,6 @@ type flags struct {
 	// Verbose log output displays the output from commands run on each
 	// server
 	Verbose bool
-
-	// Force re-provisioning and updating for all servers, skipping version
-	// and health checks
-	Force bool
 
 	// Limit the changed services to those enumerated if the flag is
 	// provided
@@ -142,11 +136,11 @@ func main() {
 	for typ, ipgroups := range batches {
 		go func(typ serviceType, ipgroups [][]string) {
 			for _, ips := range ipgroups {
-				log.Printf("[%s] %s: provision batch: %s\n\n", conf.Flags.Env, typ, ips)
+				log.Printf("[%s] %s: start batch: %s\n\n", conf.Flags.Env, typ, ips)
 
-				// Provision each batch of IPs concurrently
+				// Start each batch of IPs concurrently
 				ch := make(chan result, len(ips))
-				provisionBatch(ch, conf, typ, ips, checksums)
+				startBatch(ch, conf, typ, ips, checksums)
 				for i := 0; i < len(ips); i++ {
 					res := <-ch
 					if res.err == nil {
@@ -164,9 +158,10 @@ func main() {
 		<-done
 	}
 	if len(fails) == 0 {
-		log.Println("success")
+		log.Println("started all services")
 		os.Exit(0)
 	}
+	log.Println("failed to start some services")
 	log.Printf("succeeded: %s\n", succeeds)
 	log.Println("failed:")
 	for _, f := range fails {
@@ -175,63 +170,15 @@ func main() {
 	os.Exit(1)
 }
 
-// provision a machine as a specific class, e.g. "web" or "loadbalancer"
-func provision(
+func start(
 	conf *configuration,
 	ip string,
 	typ serviceType,
 ) error {
 	srv := conf.Services[typ]
-	for _, cmd := range srv.Provision {
-		if err := provisionOne(conf, ip, typ, cmd); err != nil {
-			return errors.Wrap(err, "provision")
-		}
-	}
-	return nil
-}
-
-func provisionOne(
-	conf *configuration,
-	ip string,
-	typ serviceType,
-	cmd string,
-) error {
-	tmpl, err := template.New("").Parse(cmd)
-	if err != nil {
-		return errors.Wrap(err, "parse template")
-	}
-	var byt []byte
-	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, addSelf(conf, ip)); err != nil {
-		return errors.Wrap(err, "execute template")
-	}
-	cmd = string(buf.Bytes())
-	log.Printf("[%s] %s: provision %s\n%s\n\n", conf.Flags.Env, typ, ip, cmd)
-	if !conf.Flags.Dry {
-		c := exec.Command("sh", "-c", cmd)
-		srv := conf.Services[typ]
-		c.Dir = srv.CmdDir
-		out, err := c.CombinedOutput()
-		if err != nil {
-			err = fmt.Errorf("%s: %s", err, string(out))
-			return errors.Wrap(err, "run cmd")
-		}
-		if conf.Flags.Verbose {
-			log.Println(string(out))
-		}
-	}
-	return nil
-}
-
-func update(
-	conf *configuration,
-	ip string,
-	typ serviceType,
-) error {
-	srv := conf.Services[typ]
-	for _, cmd := range srv.Update {
-		if err := updateOne(conf, ip, typ, cmd); err != nil {
-			return errors.Wrap(err, "update ip")
+	for _, cmd := range srv.Start {
+		if err := startOne(conf, ip, typ, cmd); err != nil {
+			return errors.Wrap(err, "start ip")
 		}
 	}
 	if srv.HealthCheckDelay > 0 {
@@ -243,7 +190,7 @@ func update(
 	return nil
 }
 
-func updateOne(
+func startOne(
 	conf *configuration,
 	ip string,
 	typ serviceType,
@@ -259,7 +206,7 @@ func updateOne(
 		return errors.Wrap(err, "execute template")
 	}
 	cmd = string(buf.Bytes())
-	log.Printf("[%s] %s: update %s\n%s\n\n", conf.Flags.Env, typ, ip, cmd)
+	log.Printf("[%s] %s: start %s\n%s\n\n", conf.Flags.Env, typ, ip, cmd)
 	if conf.Flags.Dry {
 		return nil
 	}
@@ -291,26 +238,28 @@ func checkHealthOne(
 	if err = tmpl.Execute(buf, addSelf(conf, ip)); err != nil {
 		return false, errors.Wrap(err, "execute template")
 	}
+	client := http.Client{Timeout: 10 * time.Second}
 	cmd := string(buf.Bytes())
 	const attempts = 3
-	var out []byte
 	for i := 0; i < attempts; i++ {
 		log.Printf("[%s] %s: check_health %s (%d)\n%s\n\n",
 			conf.Flags.Env, typ, ip, i+1, cmd)
 		if conf.Flags.Dry {
 			continue
 		}
-		c := exec.Command("sh", "-c", cmd)
-		c.Dir = conf.Services[typ].CmdDir
-		out, err = c.CombinedOutput()
-		if err == nil {
+		req, err := http.NewRequest("GET", cmd, nil)
+		if err != nil {
+			return false, errors.Wrap(err, "new request")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return false, errors.Wrap(err, "request")
+		}
+		if resp.StatusCode == http.StatusOK {
 			break
 		}
-		if conf.Flags.Verbose {
-			log.Printf("%s: %s\n", err, string(out))
-		}
 		if i < attempts-1 {
-			time.Sleep(time.Second)
+			time.Sleep(3 * time.Second)
 		}
 	}
 	return err == nil, nil
@@ -368,7 +317,7 @@ func checkVersion(
 	return false, nil
 }
 
-func provisionBatch(
+func startBatch(
 	ch chan result,
 	conf *configuration,
 	typ serviceType,
@@ -384,9 +333,6 @@ func provisionBatch(
 			}
 		}
 		go func(ip string, typ serviceType) {
-			// Check health. If needed, provision, then check
-			// health again (on delay)
-
 			// Then check version, and update if needed, then check
 			// health again (on delay)
 			ok, err := checkHealth(conf, ip, typ)
@@ -399,16 +345,7 @@ func provisionBatch(
 				return
 			}
 			if !ok {
-				err = provision(conf, ip, typ)
-				if err != nil {
-					ch <- result{
-						err: errors.Wrapf(err,
-							"failed provision %s", ip),
-						ip: ip,
-					}
-					return
-				}
-				err = update(conf, ip, typ)
+				err = start(conf, ip, typ)
 				if err != nil {
 					ch <- result{
 						err: errors.Wrap(err, "update"),
@@ -418,7 +355,7 @@ func provisionBatch(
 				}
 				ok, err = checkHealth(conf, ip, typ)
 				if !ok && err == nil {
-					err = errors.New("failed provision (bad health check)")
+					err = errors.New("failed start (bad health check)")
 				}
 				ch <- result{
 					err: err,
@@ -441,7 +378,7 @@ func provisionBatch(
 				ch <- result{ip: ip}
 				return
 			}
-			err = update(conf, ip, typ)
+			err = start(conf, ip, typ)
 			ch <- result{
 				err: errors.Wrap(err, "update"),
 				ip:  ip,
@@ -455,13 +392,17 @@ func parseFlags() (flags, error) {
 		return flags{}, errors.New("missing environment")
 	}
 	env := os.Args[1]
-	upfile := flag.String("u", "Upfile.toml", "path to upfile")
-	dry := flag.Bool("d", false, "dry run")
-	verbose := flag.Bool("v", false, "verbose output")
-	force := flag.Bool("f", false, "force provision")
-	limit := flag.String("l", "",
-		"limit provision and starting to specific services")
-	flag.Parse()
+	f := flag.NewFlagSet("flags", flag.ExitOnError)
+	upfile := f.String("u", "Upfile.toml", "path to upfile")
+	dry := f.Bool("d", false, "dry run")
+	verbose := f.Bool("v", false, "verbose output")
+	limit := f.String("l", "",
+		"limit to specific services")
+	if len(os.Args) > 2 {
+		f.Parse(os.Args[2:])
+	} else {
+		f.Parse(os.Args)
+	}
 	lim := map[serviceType]struct{}{}
 	lims := strings.Split(*limit, ",")
 	if len(lims) > 0 && lims[0] != "" {
@@ -475,7 +416,6 @@ func parseFlags() (flags, error) {
 		Dry:     *dry,
 		Verbose: *verbose,
 		Limit:   lim,
-		Force:   *force,
 	}
 	return flgs, nil
 }
