@@ -7,12 +7,12 @@ import (
 	"github.com/pkg/errors"
 )
 
-// GetChecksum from a given filepath. The file should be created on deploy and
-// contain a sha256 checksum at time of deploy, calculated by up. It's used to
-// determine whether another deploy is needed or redundant following a
-// successful health check.
-func GetChecksum(filepath string) ([]byte, error) {
-	fi, err := os.Open("checksum")
+// GetCalculatedChecksum from a file which was created on deploy and contains
+// only a sha256 checksum, calculated by up. This is an optional helper, but if
+// used it can determine whether another deploy is needed or redundant
+// following a successful health check.
+func GetCalculatedChecksum(filepath string) ([]byte, error) {
+	fi, err := os.Open(filepath)
 	if os.IsNotExist(err) {
 		return []byte{}, nil
 	}
