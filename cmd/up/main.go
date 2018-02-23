@@ -24,31 +24,54 @@ import (
 )
 
 type serviceConfig struct {
-	// CmdDir from which Start and HealthCheck commands will run.
-	CmdDir           string `toml:"cmd_dir"`
-	IPs              []string
-	Start            []string
-	HealthCheckPath  string `toml:"health_check_path"`
-	HealthCheckDelay int    `toml:"health_check_delay"`
-	Serial           uint
-	VersionCheckPath string `toml:"version_check_path"`
+	// CmdDir from which Start commands will run.
+	CmdDir string `toml:"cmd_dir"`
+
+	// IPs which up will start.
+	IPs []string
+
+	// Start is a series of commands which up will run on each provided IP.
+	// Go templating is available within them.
+	Start []string
+
+	// User for the remote server. This is made available in the commands
+	// for templating and used to create an additional helper {{.Remote}}.
+	// {{.Remote}} is defined as {{.User}}@{{.IP}}
+	User string
+
+	// HealthCheckURL which should reply with HTTP status code 200 when
+	// available.
+	HealthCheckURL string `toml:"health_check_url"`
+
+	// HealthCheckDelay waits a specific number of seconds before checking
+	// health of the started service. This gives the machine time a
+	// reasonable window to boot. Default 0.
+	HealthCheckDelay int `toml:"health_check_delay"`
+
+	// Serial is the max number of servers contained in a batch. Default 0,
+	// which assigns all IPs to a single batch.
+	Serial uint
+
+	// VersionCheckURL on the remote server which replies with a sha256
+	// hash that's calculated at deploy time using VersionCheckDir.
+	VersionCheckURL string `toml:"version_check_url"`
 
 	// VersionCheckDir containing the service's source code. This directory
-	// will be checksummed if VersionCheckPath is defined. If
-	// VersionCheckPath is not defined, VersionCheckDir does nothing. If
-	// VersionCheckPath is defined, but VersionCheckDir is not,
+	// will be checksummed if VersionCheckURL is defined. If
+	// VersionCheckURL is not defined, VersionCheckDir does nothing. If
+	// VersionCheckURL is defined, but VersionCheckDir is not,
 	// VersionCheckDir runs on the current directory. Hidden files and
 	// folders (those beginning with '.') are excluded from any checksum.
 	VersionCheckDir string `toml:"version_check_dir"`
 }
 
 type selfConfig struct {
-	Config *configuration
-	Self   struct {
-		IP       string
-		Checksum string
-	}
-	Vars map[string]string
+	Config   *configuration
+	IP       string
+	Checksum string
+	User     string
+	Remote   string
+	Vars     map[string]string
 }
 
 type flags struct {
@@ -68,6 +91,9 @@ type flags struct {
 	// Verbose log output displays the output from commands run on each
 	// server
 	Verbose bool
+
+	// Force start of server even when versions match
+	Force bool
 
 	// Limit the changed services to those enumerated if the flag is
 	// provided
@@ -133,6 +159,7 @@ func main() {
 	}
 
 	// checksums maps each filepath to a sha256 checksum
+	log.Println("calculating checksums")
 	checksums, err := calcChecksums(conf.Services)
 	if err != nil {
 		errLog.Fatal(errors.Wrap(err, "calc checksum"))
@@ -180,13 +207,13 @@ func main() {
 
 func start(
 	conf *configuration,
-	ip string,
+	user, ip string,
 	typ serviceType,
 	chk string,
 ) error {
 	srv := conf.Services[typ]
 	for _, cmd := range srv.Start {
-		if err := startOne(conf, ip, typ, chk, cmd); err != nil {
+		if err := startOne(conf, user, ip, typ, chk, cmd); err != nil {
 			return errors.Wrap(err, "start ip")
 		}
 	}
@@ -201,7 +228,7 @@ func start(
 
 func startOne(
 	conf *configuration,
-	ip string,
+	user, ip string,
 	typ serviceType,
 	chk, cmd string,
 ) error {
@@ -211,7 +238,7 @@ func startOne(
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	err = tmpl.Execute(buf, addSelf(conf, ip, string(chk)))
+	err = tmpl.Execute(buf, addSelf(conf, user, ip, string(chk)))
 	if err != nil {
 		return errors.Wrap(err, "execute template")
 	}
@@ -235,17 +262,17 @@ func startOne(
 
 func checkHealth(
 	conf *configuration,
-	ip string,
+	user, ip string,
 	typ serviceType,
 ) (bool, error) {
-	tmplCmd := conf.Services[typ].HealthCheckPath
+	tmplCmd := conf.Services[typ].HealthCheckURL
 	tmpl, err := template.New("").Parse(tmplCmd)
 	if err != nil {
 		return false, errors.Wrap(err, "parse template")
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, addSelf(conf, ip, "")); err != nil {
+	if err = tmpl.Execute(buf, addSelf(conf, user, ip, "")); err != nil {
 		return false, errors.Wrap(err, "execute template")
 	}
 	client := http.Client{Timeout: 10 * time.Second}
@@ -277,7 +304,7 @@ func checkHealth(
 
 func checkVersion(
 	conf *configuration,
-	ip string,
+	user, ip string,
 	typ serviceType,
 	urlTmpl string,
 	checksum string,
@@ -291,7 +318,7 @@ func checkVersion(
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, addSelf(conf, ip, "")); err != nil {
+	if err = tmpl.Execute(buf, addSelf(conf, user, ip, "")); err != nil {
 		return false, errors.Wrap(err, "execute template")
 	}
 	url := string(buf.Bytes())
@@ -332,11 +359,13 @@ func startBatch(
 	ips []string,
 	checksums map[string]string,
 ) {
-	versionCheckDir := conf.Services[typ].VersionCheckDir
+	srv := conf.Services[typ]
+	versionCheckDir := srv.VersionCheckDir
 	if len(versionCheckDir) == 0 {
 		versionCheckDir = "."
 	}
 	chk := checksums[versionCheckDir]
+	user := srv.User
 	for _, ip := range ips {
 		if len(conf.Flags.Limit) > 0 {
 			_, exists := conf.Flags.Limit[typ]
@@ -348,7 +377,7 @@ func startBatch(
 		go func(ip string, typ serviceType) {
 			// Then check version, and update if needed, then check
 			// health again (on delay)
-			ok, err := checkHealth(conf, ip, typ)
+			ok, err := checkHealth(conf, user, ip, typ)
 			if err != nil {
 				ch <- result{
 					err: errors.Wrapf(err,
@@ -358,7 +387,7 @@ func startBatch(
 				return
 			}
 			if !ok {
-				err = start(conf, ip, typ, chk)
+				err = start(conf, user, ip, typ, chk)
 				if err != nil {
 					ch <- result{
 						err: errors.Wrap(err, "update"),
@@ -366,7 +395,7 @@ func startBatch(
 					}
 					return
 				}
-				ok, err = checkHealth(conf, ip, typ)
+				ok, err = checkHealth(conf, user, ip, typ)
 				if !ok && err == nil {
 					err = errors.New("failed start (bad health check)")
 				}
@@ -376,21 +405,23 @@ func startBatch(
 				}
 				return
 			}
-			ul := conf.Services[typ].VersionCheckPath
-			ok, err = checkVersion(conf, ip, typ, ul, chk)
-			if err != nil {
-				ch <- result{
-					err: errors.Wrapf(err,
-						"failed check_version %s", ip),
-					ip: ip,
+			if !conf.Flags.Force {
+				ul := srv.VersionCheckURL
+				ok, err = checkVersion(conf, user, ip, typ, ul, chk)
+				if err != nil {
+					ch <- result{
+						err: errors.Wrapf(err,
+							"failed check_version %s", ip),
+						ip: ip,
+					}
+					return
 				}
-				return
+				if ok {
+					ch <- result{ip: ip}
+					return
+				}
 			}
-			if ok {
-				ch <- result{ip: ip}
-				return
-			}
-			err = start(conf, ip, typ, chk)
+			err = start(conf, user, ip, typ, chk)
 			ch <- result{
 				err: errors.Wrap(err, "update"),
 				ip:  ip,
@@ -408,6 +439,7 @@ func parseFlags() (flags, error) {
 	upfile := f.String("u", "Upfile.toml", "path to upfile")
 	dry := f.Bool("d", false, "dry run")
 	verbose := f.Bool("v", false, "verbose output")
+	force := f.Bool("f", false, "force start")
 	limit := f.String("l", "",
 		"limit to specific services")
 	vars := f.String("x", "", "comma-separated extra vars for commands, "+
@@ -441,6 +473,7 @@ func parseFlags() (flags, error) {
 		Upfile:  *upfile,
 		Dry:     *dry,
 		Verbose: *verbose,
+		Force:   *force,
 		Limit:   lim,
 		Vars:    extraVars,
 	}
@@ -464,10 +497,14 @@ func validateLimits(
 func calcDirChecksum(dir string) ([]byte, error) {
 	files := []string{}
 	err := filepath.Walk(dir, func(pth string, info os.FileInfo, err error) error {
-		if strings.HasPrefix(info.Name(), ".") {
+		name := info.Name()
+		if strings.HasPrefix(name, ".") && name != "." {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if info.IsDir() {
 			return nil
 		}
 		files = append(files, pth)
@@ -539,9 +576,9 @@ func calcChecksums(
 ) (map[string]string, error) {
 	chks := map[string]string{}
 	for typ, service := range conf {
-		if service.VersionCheckPath == "" {
+		if service.VersionCheckURL == "" {
 			if service.VersionCheckDir != "" {
-				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckPath", typ)
+				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckURL", typ)
 				continue
 			}
 		}
@@ -560,16 +597,13 @@ func calcChecksums(
 	return chks, nil
 }
 
-func addSelf(c *configuration, ip, checksum string) *selfConfig {
+func addSelf(c *configuration, user, ip, checksum string) *selfConfig {
 	sc := &selfConfig{
-		Config: c,
-		Self: struct {
-			IP       string
-			Checksum string
-		}{
-			IP:       ip,
-			Checksum: checksum,
-		},
+		Config:   c,
+		IP:       ip,
+		User:     user,
+		Checksum: checksum,
+		Remote:   user + "@" + ip,
 	}
 	return sc
 }
