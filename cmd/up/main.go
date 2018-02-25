@@ -63,6 +63,14 @@ type serviceConfig struct {
 	// VersionCheckDir runs on the current directory. Hidden files and
 	// folders (those beginning with '.') are excluded from any checksum.
 	VersionCheckDir string `toml:"version_check_dir"`
+
+	// VersionCheckCmd is an alternative way to check the version on a
+	// remote server. Sometimes you're not able to add a /version endpoint.
+	// In that case, remove version_check_url from your Upfile and replace
+	// it with version_check_cmd. up expects exit code 0 if versions match
+	// and exit >0 if they do not, which can be as simple as:
+	//	grep -Fxq {{.Checksum}} ./checksum.file
+	VersionCheckCmd string `toml:"version_check_cmd"`
 }
 
 type selfConfig struct {
@@ -164,6 +172,7 @@ func main() {
 	if err != nil {
 		errLog.Fatal(errors.Wrap(err, "calc checksum"))
 	}
+	log.Println(checksums)
 
 	// Bring up each service type in parallel
 	done := make(chan bool, len(batches))
@@ -266,6 +275,10 @@ func checkHealth(
 	typ serviceType,
 ) (bool, error) {
 	tmplCmd := conf.Services[typ].HealthCheckURL
+	if len(tmplCmd) == 0 {
+		log.Printf("health_check_url missing for %s. assuming failed\n", ip)
+		return false, nil
+	}
 	tmpl, err := template.New("").Parse(tmplCmd)
 	if err != nil {
 		return false, errors.Wrap(err, "parse template")
@@ -277,6 +290,7 @@ func checkHealth(
 	}
 	client := http.Client{Timeout: 10 * time.Second}
 	cmd := string(buf.Bytes())
+	var code int
 	const attempts = 3
 	for i := 0; i < attempts; i++ {
 		log.Printf("[%s] %s: check_health %s (%d)\n%s\n\n",
@@ -292,17 +306,18 @@ func checkHealth(
 		if err != nil {
 			return false, errors.Wrap(err, "request")
 		}
-		if resp.StatusCode == http.StatusOK {
+		code = resp.StatusCode
+		if code == http.StatusOK {
 			break
 		}
 		if i < attempts-1 {
 			time.Sleep(3 * time.Second)
 		}
 	}
-	return err == nil, nil
+	return code == http.StatusOK, nil
 }
 
-func checkVersion(
+func checkVersionURL(
 	conf *configuration,
 	user, ip string,
 	typ serviceType,
@@ -318,7 +333,7 @@ func checkVersion(
 	}
 	var byt []byte
 	buf := bytes.NewBuffer(byt)
-	if err = tmpl.Execute(buf, addSelf(conf, user, ip, "")); err != nil {
+	if err = tmpl.Execute(buf, addSelf(conf, user, ip, checksum)); err != nil {
 		return false, errors.Wrap(err, "execute template")
 	}
 	url := string(buf.Bytes())
@@ -352,6 +367,44 @@ func checkVersion(
 	return false, nil
 }
 
+func checkVersionCmd(
+	conf *configuration,
+	user, ip string,
+	typ serviceType,
+	cmdTmpl, checksum string,
+) (bool, error) {
+	if len(cmdTmpl) == 0 || len(checksum) == 0 {
+		return false, nil
+	}
+	tmpl, err := template.New("").Parse(cmdTmpl)
+	if err != nil {
+		return false, errors.Wrap(err, "parse template")
+	}
+	var byt []byte
+	buf := bytes.NewBuffer(byt)
+	if err = tmpl.Execute(buf, addSelf(conf, user, ip, checksum)); err != nil {
+		return false, errors.Wrap(err, "execute template")
+	}
+	cmd := string(buf.Bytes())
+	log.Printf("[%s] %s: check_version_cmd %s\n%s\n\n", conf.Flags.Env, typ, ip, cmd)
+	if conf.Flags.Dry {
+		return false, nil
+	}
+	c := exec.Command("sh", "-c", cmd)
+	c.Dir = conf.Services[typ].CmdDir
+	out, err := c.CombinedOutput()
+	if conf.Flags.Verbose {
+		log.Println(string(out))
+	}
+	if err != nil {
+		// Log but don't error out, just assume that the version
+		// doesn't match given an exit code > 0
+		log.Println(err)
+		return false, nil
+	}
+	return true, nil
+}
+
 func startBatch(
 	ch chan result,
 	conf *configuration,
@@ -379,12 +432,11 @@ func startBatch(
 			// health again (on delay)
 			ok, err := checkHealth(conf, user, ip, typ)
 			if err != nil {
-				ch <- result{
-					err: errors.Wrapf(err,
-						"failed check_health %s", ip),
-					ip: ip,
-				}
-				return
+				// Log the error, but since we haven't started
+				// yet we'll just consider it not ok and try to
+				// boot
+				log.Printf("[%s] %s: failed health check: %s\n\n", conf.Flags.Env, typ, ip)
+				ok = false
 			}
 			if !ok {
 				err = start(conf, user, ip, typ, chk)
@@ -407,11 +459,25 @@ func startBatch(
 			}
 			if !conf.Flags.Force {
 				ul := srv.VersionCheckURL
-				ok, err = checkVersion(conf, user, ip, typ, ul, chk)
+				vcCmd := srv.VersionCheckCmd
+				var vtype string
+				if len(ul) > 0 && len(vcCmd) > 0 {
+					ch <- result{
+						err: errors.New("cannot define both version_check_url and version_check_cmd in upfile"),
+						ip:  ip,
+					}
+					return
+				} else if len(ul) > 0 {
+					vtype = "url"
+					ok, err = checkVersionURL(conf, user, ip, typ, ul, chk)
+				} else if len(vcCmd) > 0 {
+					vtype = "cmd"
+					ok, err = checkVersionCmd(conf, user, ip, typ, vcCmd, chk)
+				}
 				if err != nil {
 					ch <- result{
 						err: errors.Wrapf(err,
-							"failed check_version %s", ip),
+							"failed check_version %s %s", vtype, ip),
 						ip: ip,
 					}
 					return
@@ -422,10 +488,22 @@ func startBatch(
 				}
 			}
 			err = start(conf, user, ip, typ, chk)
+			if err != nil {
+				ch <- result{
+					err: errors.Wrap(err, "update"),
+					ip:  ip,
+				}
+				return
+			}
+			ok, err = checkHealth(conf, user, ip, typ)
+			if !ok && err == nil {
+				err = errors.New("failed start (bad health check)")
+			}
 			ch <- result{
-				err: errors.Wrap(err, "update"),
+				err: err,
 				ip:  ip,
 			}
+			return
 		}(ip, typ)
 	}
 }
@@ -497,6 +575,9 @@ func validateLimits(
 func calcDirChecksum(dir string) ([]byte, error) {
 	files := []string{}
 	err := filepath.Walk(dir, func(pth string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 		name := info.Name()
 		if strings.HasPrefix(name, ".") && name != "." {
 			if info.IsDir() {
@@ -527,7 +608,11 @@ func calcDirChecksum(dir string) ([]byte, error) {
 			return nil, errors.Wrap(err, "close file")
 		}
 	}
-	return h.Sum(nil), nil
+	sum := h.Sum(nil)
+	if len(sum) == 0 {
+		return nil, errors.New("empty checksum")
+	}
+	return sum, nil
 }
 
 func randomizeOrder(ss []string) []string {
@@ -576,9 +661,9 @@ func calcChecksums(
 ) (map[string]string, error) {
 	chks := map[string]string{}
 	for typ, service := range conf {
-		if service.VersionCheckURL == "" {
+		if service.VersionCheckURL == "" && service.VersionCheckCmd == "" {
 			if service.VersionCheckDir != "" {
-				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckURL", typ)
+				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckURL and VersionCheckCmd", typ)
 				continue
 			}
 		}
