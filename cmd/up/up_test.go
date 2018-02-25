@@ -117,9 +117,14 @@ func sliceDeepEq(a, b [][]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for _, vs := range a {
-		seen := map[string]struct{}{}
+	count := 0
+	seen := map[string]struct{}{}
+	for i, vs := range a {
+		if len(vs) != len(b[i]) {
+			return false
+		}
 		for _, v := range vs {
+			count++
 			seen[v] = struct{}{}
 		}
 	}
