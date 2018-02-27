@@ -158,7 +158,7 @@ func main() {
 	conf := &configuration{Services: services, Flags: flgs}
 
 	// Multiple batches for rolling deploy
-	batches, err := makeBatches(conf.Services)
+	batches, err := makeBatches(conf.Services, conf.Flags.Limit)
 	if err != nil {
 		errLog.Fatal(errors.Wrap(err, "make batches"))
 	}
@@ -168,7 +168,7 @@ func main() {
 
 	// checksums maps each filepath to a sha256 checksum
 	log.Println("calculating checksums")
-	checksums, err := calcChecksums(conf.Services)
+	checksums, err := calcChecksums(conf.Services, conf.Flags.Limit)
 	if err != nil {
 		errLog.Fatal(errors.Wrap(err, "calc checksum"))
 	}
@@ -311,7 +311,7 @@ func checkHealth(
 			break
 		}
 		if i < attempts-1 {
-			time.Sleep(3 * time.Second)
+			time.Sleep(5 * time.Second)
 		}
 	}
 	return code == http.StatusOK, nil
@@ -624,9 +624,17 @@ func randomizeOrder(ss []string) []string {
 	return out
 }
 
-func makeBatches(conf map[serviceType]*serviceConfig) (batch, error) {
+func makeBatches(
+	conf map[serviceType]*serviceConfig,
+	limit map[serviceType]struct{},
+) (batch, error) {
 	batches := batch{}
 	for typ, service := range conf {
+		if len(limit) > 0 {
+			if _, exist := limit[typ]; !exist {
+				continue
+			}
+		}
 		if len(service.IPs) == 0 {
 			return nil, fmt.Errorf("no ips for %s", typ)
 		}
@@ -658,9 +666,15 @@ func makeBatches(conf map[serviceType]*serviceConfig) (batch, error) {
 
 func calcChecksums(
 	conf map[serviceType]*serviceConfig,
+	limit map[serviceType]struct{},
 ) (map[string]string, error) {
 	chks := map[string]string{}
 	for typ, service := range conf {
+		if len(limit) > 0 {
+			if _, exist := limit[typ]; !exist {
+				continue
+			}
+		}
 		if service.VersionCheckURL == "" && service.VersionCheckCmd == "" {
 			if service.VersionCheckDir != "" {
 				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckURL and VersionCheckCmd", typ)
