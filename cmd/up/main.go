@@ -129,10 +129,6 @@ type result struct {
 // TODO: show example Upfiles working across windows and linux dev environments
 // in readme
 func main() {
-	// TODO flags: -x extra-vars file for passing in extra template data
-	// without it remaining in source, like a secret API key for a health
-	// check, or specific IPs for a blue-green deploy
-
 	errLog := log.New(os.Stdout, "", log.Lshortfile)
 	log.SetFlags(0)
 	rand.Seed(time.Now().UnixNano())
