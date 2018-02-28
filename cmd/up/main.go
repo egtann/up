@@ -61,7 +61,8 @@ type serviceConfig struct {
 	// VersionCheckURL is not defined, VersionCheckDir does nothing. If
 	// VersionCheckURL is defined, but VersionCheckDir is not,
 	// VersionCheckDir runs on the current directory. Hidden files and
-	// folders (those beginning with '.') are excluded from any checksum.
+	// folders (those beginning with '.') as well as symlinks are excluded
+	// from any checksum.
 	VersionCheckDir string `toml:"version_check_dir"`
 
 	// VersionCheckCmd is an alternative way to check the version on a
@@ -581,11 +582,11 @@ func calcDirChecksum(dir string) ([]byte, error) {
 			}
 			return nil
 		}
-		if info.IsDir() {
+		if info.IsDir() || !info.Mode().IsRegular() {
 			return nil
 		}
 		files = append(files, pth)
-		return err
+		return nil
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "walk filepath")
