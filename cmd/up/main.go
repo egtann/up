@@ -203,6 +203,9 @@ func main() {
 		log.Println("started all services")
 		os.Exit(0)
 	}
+	if conf.Flags.Dry {
+		os.Exit(0)
+	}
 	log.Printf("\nfailed to start some services\n\n")
 	log.Println("succeeded:")
 	for _, s := range succeeds {
@@ -230,10 +233,12 @@ func start(
 		}
 	}
 	if srv.HealthCheckDelay > 0 {
-		log.Printf("[%s] %s: waiting %d seconds for health check delay\n\n",
-			conf.Flags.Env, typ, srv.HealthCheckDelay)
-		delay := time.Duration(srv.HealthCheckDelay)
-		time.Sleep(delay * time.Second)
+		log.Printf("[%s] %s: check health %s: waiting %d seconds for health check delay\n\n",
+			conf.Flags.Env, typ, ip, srv.HealthCheckDelay)
+		if !conf.Flags.Dry {
+			delay := time.Duration(srv.HealthCheckDelay)
+			time.Sleep(delay * time.Second)
+		}
 	}
 	return nil
 }
