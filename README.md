@@ -20,10 +20,9 @@ You'll describe your server architecture in a single file (`Upfile.toml`), then
 use the `up` command to bring everything online. You can find an example
 `Upfile.toml` in this project.
 
-Running `up` performs 4 tasks on each server:
+Running `up` performs 3 tasks on each server:
 
-* Provision and start
-* Update
+* Start
 * Check version
 * Check health
 
@@ -54,7 +53,7 @@ Then it checks the version of each service, and updates any that have changed.
 - [x] Agentless deploys
 - [x] Stateless. Up checks your infrastructure to determine its state on each
       run, so nothing is ever out-of-date
-- [ ] Start an already-pushed service only if `up` detects changes in the
+- [x] Start an already-pushed service only if `up` detects changes in the
       service's directory
 - [ ] Pass in template variables via the `up` CLI
 
