@@ -127,6 +127,8 @@ type result struct {
 	ip  string
 }
 
+const httpTimeout = 10 * time.Second
+
 // TODO: show example Upfiles working across windows and linux dev environments
 // in readme
 func main() {
@@ -164,12 +166,11 @@ func main() {
 	}
 
 	// checksums maps each filepath to a sha256 checksum
-	log.Println("calculating checksums")
+	log.Printf("calculating checksums...\n\n")
 	checksums, err := calcChecksums(conf.Services, conf.Flags.Limit)
 	if err != nil {
 		errLog.Fatal(errors.Wrap(err, "calc checksum"))
 	}
-	log.Println(checksums)
 
 	// Bring up each service type in parallel
 	done := make(chan bool, len(batches))
@@ -202,8 +203,12 @@ func main() {
 		log.Println("started all services")
 		os.Exit(0)
 	}
-	log.Printf("\nfailed to start some services\n")
-	log.Printf("\nsucceeded: %s\n", succeeds)
+	log.Printf("\nfailed to start some services\n\n")
+	log.Println("succeeded:")
+	for _, s := range succeeds {
+		log.Println(s)
+	}
+	log.Printf("\n\n")
 	log.Println("failed:")
 	for _, f := range fails {
 		log.Printf("%s: %s\n", f.ip, f.err)
@@ -218,8 +223,9 @@ func start(
 	chk string,
 ) error {
 	srv := conf.Services[typ]
-	for _, cmd := range srv.Start {
-		if err := startOne(conf, user, ip, typ, chk, cmd); err != nil {
+	for i, cmd := range srv.Start {
+		err := startOne(conf, user, ip, typ, chk, cmd, i, len(srv.Start))
+		if err != nil {
 			return errors.Wrap(err, "start ip")
 		}
 	}
@@ -237,6 +243,7 @@ func startOne(
 	user, ip string,
 	typ serviceType,
 	chk, cmd string,
+	cmdIdx, cmdsLen int,
 ) error {
 	tmpl, err := template.New("").Parse(cmd)
 	if err != nil {
@@ -249,7 +256,8 @@ func startOne(
 		return errors.Wrap(err, "execute template")
 	}
 	cmd = string(buf.Bytes())
-	log.Printf("[%s] %s: start %s\n%s\n\n", conf.Flags.Env, typ, ip, cmd)
+	log.Printf("[%s] %s: start %s (%d/%d)\n%s\n\n", conf.Flags.Env, typ,
+		ip, cmdIdx+1, cmdsLen, strings.TrimSpace(cmd))
 	if conf.Flags.Dry {
 		return nil
 	}
@@ -273,8 +281,8 @@ func checkHealth(
 ) (bool, error) {
 	tmplCmd := conf.Services[typ].HealthCheckURL
 	if len(tmplCmd) == 0 {
-		log.Printf("health_check_url missing for %s. assuming failed\n", ip)
-		return false, nil
+		log.Printf("health_check_url missing for %s. assuming succeeded\n", ip)
+		return true, nil
 	}
 	tmpl, err := template.New("").Parse(tmplCmd)
 	if err != nil {
@@ -285,33 +293,24 @@ func checkHealth(
 	if err = tmpl.Execute(buf, addSelf(conf, user, ip, "")); err != nil {
 		return false, errors.Wrap(err, "execute template")
 	}
-	client := http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: httpTimeout}
 	cmd := string(buf.Bytes())
-	var code int
-	const attempts = 3
-	for i := 0; i < attempts; i++ {
-		log.Printf("[%s] %s: check_health %s (%d)\n%s\n\n",
-			conf.Flags.Env, typ, ip, i+1, cmd)
-		if conf.Flags.Dry {
-			continue
-		}
-		req, err := http.NewRequest("GET", cmd, nil)
-		if err != nil {
-			return false, errors.Wrap(err, "new request")
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return false, errors.Wrap(err, "request")
-		}
-		code = resp.StatusCode
-		if code == http.StatusOK {
-			break
-		}
-		if i < attempts-1 {
-			time.Sleep(5 * time.Second)
-		}
+	if conf.Flags.Dry {
+		log.Printf("[%s] %s: check health %s\n\n", conf.Flags.Env, typ,
+			cmd)
+		return false, nil
 	}
-	return code == http.StatusOK, nil
+	req, err := http.NewRequest("GET", cmd, nil)
+	if err != nil {
+		return false, errors.Wrap(err, "new request")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, errors.Wrap(err, "request")
+	}
+	log.Printf("[%s] %s: check health %s\n%s\n\n", conf.Flags.Env, typ,
+		cmd, resp.Status)
+	return resp.StatusCode == http.StatusOK, nil
 }
 
 func checkVersionURL(
@@ -334,12 +333,12 @@ func checkVersionURL(
 		return false, errors.Wrap(err, "execute template")
 	}
 	url := string(buf.Bytes())
-	log.Println("getting version at", url)
+	log.Printf("[%s] %s: get version %s\n", conf.Flags.Env, typ, ip)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return false, errors.Wrap(err, "get version")
 	}
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: httpTimeout}
 	rsp, err := client.Do(req)
 	if err != nil {
 		return false, errors.Wrap(err, "make request")
@@ -356,11 +355,10 @@ func checkVersionURL(
 		return false, errors.Wrap(err, "read resp body")
 	}
 	if string(body) == checksum {
-		log.Printf("same version found for %s, skipping\n", ip)
+		log.Printf("same version, skipping\n\n")
 		return true, nil
 	}
-	log.Printf("server version %q\n", string(body))
-	log.Printf("local version %q\n", checksum)
+	log.Printf("new version, updating\n\n")
 	return false, nil
 }
 
