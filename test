@@ -1,0 +1,18 @@
+# comments are denoted like so
+
+# start checks health and the version for each server provided in the inventory
+# and runs iff check_health or check_version fail (non status-0 exit code).
+start: check_health check_version
+	{{.provision}}
+	{{.update}}
+	{{.compile}}
+	{{.copy_to_remote}}
+	ssh {{.remote}} 'sudo systemctl daemon-reload'
+	ssh {{.remote}} 'sudo service abot restart'
+	sleep 10 && {{.check_health}}
+
+check_health:
+	curl {{.IP}}/health
+
+check_version:
+	expr {{.Checksum}} == `curl {{.IP}}/version`

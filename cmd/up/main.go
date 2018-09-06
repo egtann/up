@@ -2,135 +2,32 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/base64"
 	"flag"
-	"fmt"
-	"html/template"
-	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
+	"github.com/egtann/up"
 	"github.com/pkg/errors"
 )
 
-type serviceConfig struct {
-	// CmdDir from which Start commands will run.
-	CmdDir string `toml:"cmd_dir"`
-
-	// IPs which up will start.
-	IPs []string
-
-	// Start is a series of commands which up will run on each provided IP.
-	// Go templating is available within them.
-	Start []string
-
-	// User for the remote server. This is made available in the commands
-	// for templating and used to create an additional helper {{.Remote}}.
-	// {{.Remote}} is defined as {{.User}}@{{.IP}}
-	User string
-
-	// HealthCheckURL which should reply with HTTP status code 200 when
-	// available.
-	HealthCheckURL string `toml:"health_check_url"`
-
-	// HealthCheckDelay waits a specific number of seconds before checking
-	// health of the started service. This gives the machine time a
-	// reasonable window to boot. Default 0.
-	HealthCheckDelay int `toml:"health_check_delay"`
-
-	// Serial is the max number of servers contained in a batch. Default 0,
-	// which assigns all IPs to a single batch.
-	Serial uint
-
-	// VersionCheckURL on the remote server which replies with a sha256
-	// hash that's calculated at deploy time using VersionCheckDir.
-	VersionCheckURL string `toml:"version_check_url"`
-
-	// VersionCheckDir containing the service's source code. This directory
-	// will be checksummed if VersionCheckURL is defined. If
-	// VersionCheckURL is not defined, VersionCheckDir does nothing. If
-	// VersionCheckURL is defined, but VersionCheckDir is not,
-	// VersionCheckDir runs on the current directory. Hidden files and
-	// folders (those beginning with '.') as well as symlinks are excluded
-	// from any checksum.
-	VersionCheckDir string `toml:"version_check_dir"`
-
-	// VersionCheckCmd is an alternative way to check the version on a
-	// remote server. Sometimes you're not able to add a /version endpoint.
-	// In that case, remove version_check_url from your Upfile and replace
-	// it with version_check_cmd. up expects exit code 0 if versions match
-	// and exit >0 if they do not, which can be as simple as:
-	//	grep -Fxq {{.Checksum}} ./checksum.file
-	VersionCheckCmd string `toml:"version_check_cmd"`
-}
-
-type selfConfig struct {
-	Config   *configuration
-	IP       string
-	Checksum string
-	User     string
-	Remote   string
-	Vars     map[string]string
-}
-
 type flags struct {
-	// Env is the environment which you wish to bring up, e.g. "staging" or
-	// "production"
-	Env string
-
 	// Upfile allows you to specify a different Upfile name. This is
 	// helpful when running across multiple operating systems or shells.
 	// For example, you may have Upfile.windows.toml and Upfile.linux.toml,
 	// or Upfile.bash.toml and Upfile.fish.toml.
 	Upfile string
 
-	// Dry run lists all commands that would be run without running them
-	Dry bool
-
-	// Verbose log output displays the output from commands run on each
-	// server
-	Verbose bool
-
-	// Force start of server even when versions match
-	Force bool
-
 	// Limit the changed services to those enumerated if the flag is
 	// provided
-	Limit map[serviceType]struct{}
+	Limit map[up.InvName]struct{}
 
 	// Vars passed into `up` at runtime to be used in start commands.
 	Vars map[string]string
 }
 
-type serviceType = string
-
-type configuration struct {
-	Services map[serviceType]*serviceConfig
-	Flags    flags
-}
-
-// batch maps a service to several groups of IPs
-type batch map[serviceType][][]string
-
-type result struct {
-	err error
-	ip  string
-}
-
-const httpTimeout = 10 * time.Second
-
-// TODO: show example Upfiles working across windows and linux dev environments
-// in readme
 func main() {
 	errLog := log.New(os.Stdout, "", log.Lshortfile)
 	log.SetFlags(0)
@@ -141,6 +38,53 @@ func main() {
 		errLog.Fatal(errors.Wrap(err, "parse flags"))
 	}
 
+	fi, err := os.Open(flgs.Upfile)
+	if err != nil {
+		errLog.Fatal(errors.Wrap(err, "open upfile"))
+	}
+	defer fi.Close()
+	conf, err := up.Parse(fi)
+	if err != nil {
+		errLog.Fatal(errors.Wrap(err, "parse upfile"))
+	}
+	log.Printf("\n\nupfile conf\n%+v\n", conf)
+}
+
+func parseFlags() (flags, error) {
+	f := flag.NewFlagSet("flags", flag.ExitOnError)
+	upfile := f.String("u", "Upfile", "path to upfile")
+	limit := f.String("l", "", "limit to specific services")
+	vars := f.String("x", "", "comma-separated extra vars for commands, "+
+		"e.g. Color=Red,Font=Small")
+	f.Parse(os.Args)
+	lim := map[up.InvName]struct{}{}
+	lims := strings.Split(*limit, ",")
+	if len(lims) > 0 && lims[0] != "" {
+		for _, service := range lims {
+			lim[up.InvName(service)] = struct{}{}
+		}
+	}
+	varList := strings.Split(*vars, ",")
+	extraVars := map[string]string{}
+	for _, pair := range varList {
+		if len(pair) == 0 {
+			continue
+		}
+		vals := strings.Split(pair, "=")
+		if len(vals) != 2 {
+			return flags{}, errors.New("invalid extra var")
+		}
+		extraVars[vals[0]] = vals[1]
+	}
+	flgs := flags{
+		Upfile: *upfile,
+		Limit:  lim,
+		Vars:   extraVars,
+	}
+	return flgs, nil
+}
+
+/*
 	upfileData := map[string]map[serviceType]*serviceConfig{}
 	if _, err = toml.DecodeFile(flgs.Upfile, &upfileData); err != nil {
 		errLog.Fatal(errors.Wrap(err, "decode toml"))
@@ -508,55 +452,6 @@ func startBatch(
 	}
 }
 
-func parseFlags() (flags, error) {
-	if len(os.Args) <= 1 {
-		return flags{}, errors.New("missing environment")
-	}
-	env := os.Args[1]
-	f := flag.NewFlagSet("flags", flag.ExitOnError)
-	upfile := f.String("u", "Upfile.toml", "path to upfile")
-	dry := f.Bool("d", false, "dry run")
-	verbose := f.Bool("v", false, "verbose output")
-	force := f.Bool("f", false, "force start")
-	limit := f.String("l", "",
-		"limit to specific services")
-	vars := f.String("x", "", "comma-separated extra vars for commands, "+
-		"e.g. Color=Red,Font=Small")
-	if len(os.Args) > 2 {
-		f.Parse(os.Args[2:])
-	} else {
-		f.Parse(os.Args)
-	}
-	lim := map[serviceType]struct{}{}
-	lims := strings.Split(*limit, ",")
-	if len(lims) > 0 && lims[0] != "" {
-		for _, service := range lims {
-			lim[serviceType(service)] = struct{}{}
-		}
-	}
-	varList := strings.Split(*vars, ",")
-	extraVars := map[string]string{}
-	for _, pair := range varList {
-		if len(pair) == 0 {
-			continue
-		}
-		vals := strings.Split(pair, "=")
-		if len(vals) != 2 {
-			return flags{}, errors.New("invalid extra var")
-		}
-		extraVars[vals[0]] = vals[1]
-	}
-	flgs := flags{
-		Env:     env,
-		Upfile:  *upfile,
-		Dry:     *dry,
-		Verbose: *verbose,
-		Force:   *force,
-		Limit:   lim,
-		Vars:    extraVars,
-	}
-	return flgs, nil
-}
 
 func validateLimits(
 	limits map[serviceType]struct{},
@@ -706,3 +601,4 @@ func addSelf(c *configuration, user, ip, checksum string) *selfConfig {
 	}
 	return sc
 }
+*/

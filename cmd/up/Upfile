@@ -1,0 +1,12 @@
+inventory production
+	1.1.1.1
+	1.1.1.2
+
+inventory staging
+	www.example.com
+
+deploy check_health
+	echo 'deploy'
+
+check_health
+	echo 'check_health'
