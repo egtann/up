@@ -1,0 +1,6 @@
+inventory:
+	production:
+		1.1.1.1
+	staging:
+		www.example.com
+		1.1.1.2

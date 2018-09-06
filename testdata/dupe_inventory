@@ -1,0 +1,7 @@
+inventory:
+	production:
+		1.1.1.1
+
+inventory:
+	staging:
+		1.2.3.4
