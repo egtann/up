@@ -1,6 +1,9 @@
 package up
 
-import "net/http"
+import (
+	"net/http"
+	"testing"
+)
 
 func ExampleGetCalculatedChecksum() {
 	mux := http.NewServeMux()
@@ -12,4 +15,7 @@ func ExampleGetCalculatedChecksum() {
 		}
 		w.Write(check)
 	})
+}
+
+func TestSubstituteVariables(t *testing.T) {
 }

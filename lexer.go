@@ -15,6 +15,7 @@ const (
 	tokenError   tokenType = iota // Error occurred. Value is text of err
 	tokenEOF                      // Designate the end of the file
 	tokenSpace                    // Run of spaces separating arguments
+	tokenTab                      // Tab '\t'
 	tokenNewline                  // Line break
 	tokenText                     // Plaintext
 
@@ -60,8 +61,8 @@ func lex(input string) *lexer {
 	return l
 }
 
-// drain drains the output so the lexing goroutine will exit. Called by the
-// parser, not in the lexing goroutine.
+// drain the output so the lexing goroutine will exit. Called by the parser,
+// not in the lexing goroutine.
 func (l *lexer) drain() {
 	for range l.tokens {
 	}
@@ -70,7 +71,6 @@ func (l *lexer) drain() {
 // emit passes an token back to the client.
 func (l *lexer) emit(t tokenType) {
 	tkn := token{typ: t, val: l.input[l.start:l.pos]}
-	// log.Println("emit", tkn)
 	l.tokens <- tkn
 	l.start = l.pos
 }
@@ -83,7 +83,6 @@ func (l *lexer) next() rune {
 	r, w := utf8.DecodeRuneInString(l.input[l.pos:])
 	l.width = w
 	l.pos += l.width
-	// log.Println("rune", string(r))
 	return r
 }
 
@@ -135,22 +134,31 @@ func (l *lexer) errorf(format string, args ...interface{}) stateFn {
 }
 
 func lexText(l *lexer) stateFn {
+Outer:
 	for {
 		text := l.input[l.start:l.pos]
 		r := l.next()
 		switch {
 		case r == eof:
-			break
+			break Outer
 		case text == "inventory":
 			l.backup()
 			l.emit(tokenInventory)
 		case isEndOfLine(r):
 			l.backup()
-			l.emit(tokenText)
+			if len(text) > 0 {
+				l.emit(tokenText)
+			}
 			l.next()
 			l.emit(tokenNewline)
-		case isSpace(r):
+		case r == ' ':
+			l.backup()
+			if len(text) > 0 {
+				l.emit(tokenText)
+			}
 			return lexSpace
+		case r == '\t':
+			l.emit(tokenTab)
 		}
 	}
 	// Correctly reached EOF
@@ -162,9 +170,8 @@ func lexText(l *lexer) stateFn {
 }
 
 func lexSpace(l *lexer) stateFn {
-	var r rune
-	for isSpace(l.peek()) {
-		r = l.next()
+	for l.peek() == ' ' {
+		l.next()
 	}
 	l.emit(tokenSpace)
 	return lexText
@@ -173,10 +180,6 @@ func lexSpace(l *lexer) stateFn {
 func isAlphaNumeric(r rune) bool {
 	return r == '_' || r == '.' || unicode.IsLetter(r) ||
 		unicode.IsDigit(r)
-}
-
-func isSpace(r rune) bool {
-	return r == ' ' || r == '\t'
 }
 
 func isEndOfLine(r rune) bool {

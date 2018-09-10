@@ -2,11 +2,19 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/egtann/up"
@@ -20,12 +28,37 @@ type flags struct {
 	// or Upfile.bash.toml and Upfile.fish.toml.
 	Upfile string
 
+	// Command to run. Like `make`, an empty Command defaults to the first
+	// command in the Upfile.
+	Command up.CmdName
+
 	// Limit the changed services to those enumerated if the flag is
 	// provided
 	Limit map[up.InvName]struct{}
 
+	// Serial determines how many servers of the same type will be operated
+	// on at any one time. This defaults to 1. Use 0 to specify all of
+	// them.
+	Serial int
+
+	// Directory used to calculate the checksum. Defaults to the current
+	// directory.
+	Directory string
+
 	// Vars passed into `up` at runtime to be used in start commands.
 	Vars map[string]string
+}
+
+type batch map[up.InvName][][]string
+
+type tmplData struct {
+	Server   string
+	Checksum string
+}
+
+type result struct {
+	server string
+	err    error
 }
 
 func main() {
@@ -47,16 +80,223 @@ func main() {
 	if err != nil {
 		errLog.Fatal(errors.Wrap(err, "parse upfile"))
 	}
-	log.Printf("\n\nupfile conf\n%+v\n", conf)
+	if flgs.Command != "" {
+		conf.DefaultCommand = flgs.Command
+		if _, exist := conf.Commands[conf.DefaultCommand]; !exist {
+			errLog.Fatal(fmt.Errorf("command %s is not defined",
+				conf.DefaultCommand))
+		}
+	}
+	if len(flgs.Limit) == 0 {
+		log.Printf("running %s on all\n", conf.DefaultCommand)
+	} else {
+		lims := []string{}
+		for lim := range flgs.Limit {
+			lims = append(lims, string(lim))
+		}
+		tmp := strings.Join(lims, ", ")
+		log.Printf("running %s on %s\n", conf.DefaultCommand, tmp)
+	}
+
+	// Remove any unnecessary inventory. All remaining defined inventory
+	// will be used.
+	if len(flgs.Limit) > 0 {
+		for invName := range conf.Inventory {
+			if _, exist := flgs.Limit[invName]; !exist {
+				delete(conf.Inventory, invName)
+			}
+		}
+	} else {
+		lims := map[up.InvName]struct{}{}
+		for invName := range conf.Inventory {
+			lims[invName] = struct{}{}
+		}
+		flgs.Limit = lims
+	}
+
+	// Validate all limits are defined in inventory (i.e. no silent failure
+	// on typos).
+	if len(flgs.Limit) > len(conf.Inventory) {
+		// TODO improve error message to specify which limits are
+		// undefined
+		errLog.Fatal(errors.New("undefined limits"))
+	}
+
+	// Calculate a sha256 checksum on the provided directory (defaults to
+	// current directory).
+	log.Printf("calculating checksum\n")
+	chk, err := calcChecksum(flgs.Directory)
+	if err != nil {
+		errLog.Fatal(errors.Wrap(err, "calc checksum"))
+	}
+
+	// Split into batches limited in size by the provided Serial flag.
+	batches, err := makeBatches(conf, flgs.Serial)
+	if err != nil {
+		errLog.Fatal(errors.Wrap(err, "make batches"))
+	}
+	log.Printf("got batches: %v\n", batches)
+
+	// For each batch, run the ExecIfs and run Execs if necessary.
+	done := make(chan bool, len(batches))
+	succeeds, fails := []string{}, []result{}
+	for _, srvBatch := range batches {
+		go func(srvBatch [][]string) {
+			for _, srvGroup := range srvBatch {
+				ch := make(chan result, len(srvGroup))
+				srvGroup = randomizeOrder(srvGroup)
+				cmd := conf.Commands[conf.DefaultCommand]
+
+				// TODO not sending enough results back... debug why
+				runExecIfs(ch, conf.Commands, cmd, chk, srvGroup)
+				for i := 0; i < len(srvGroup); i++ {
+					res := <-ch
+					if res.err == nil {
+						succeeds = append(succeeds, res.server)
+					} else {
+						fails = append(fails, res)
+					}
+				}
+				close(ch)
+			}
+			done <- true
+		}(srvBatch)
+	}
+	for i := 0; i < len(batches); i++ {
+		<-done
+	}
+	if len(fails) == 0 {
+		log.Println("success")
+		os.Exit(0)
+	}
+	log.Printf("\nfailed to start some services\n\n")
+	log.Println("succeeded:")
+	for _, s := range succeeds {
+		log.Println(s)
+	}
+	log.Printf("\n\n")
+	log.Println("failed:")
+	for _, f := range fails {
+		log.Printf("%s: %s\n", f.server, f.err)
+	}
+	os.Exit(1)
 }
 
+func runExecIfs(
+	ch chan result,
+	cmds map[up.CmdName]*up.Cmd,
+	cmd *up.Cmd,
+	chk string,
+	servers []string,
+) {
+	send := func(ch chan result, err error, servers []string) {
+		for _, srv := range servers {
+			ch <- result{server: srv, err: err}
+		}
+	}
+	var needToRun bool
+	for _, execIf := range cmd.ExecIfs {
+		// TODO should this also enforce ExecIfs? Probably...
+		// TODO this should handle errors correctly through the channel
+		steps := cmds[execIf].Execs
+		for _, step := range steps {
+			ok, err := runExec(cmds, step, chk, servers, true)
+			if err != nil {
+				send(ch, err, servers)
+				return
+			}
+			if !ok {
+				needToRun = true
+			}
+		}
+	}
+	if !needToRun {
+		for _, srv := range servers {
+			ch <- result{server: srv}
+		}
+		return
+	}
+	for _, cmdLine := range cmd.Execs {
+		_, err := runExec(cmds, cmdLine, chk, servers, false)
+		if err != nil {
+			send(ch, err, servers)
+			return
+		}
+	}
+	send(ch, nil, servers)
+}
+
+// runExec reports whether all execIfs passed and an error if any.
+func runExec(
+	cmds map[up.CmdName]*up.Cmd,
+	cmd, chk string,
+	servers []string,
+	execIf bool,
+) (bool, error) {
+	tmpl, err := template.New("").Parse(cmd)
+	if err != nil {
+		return false, errors.Wrap(err, "parse template")
+	}
+	for _, server := range servers {
+		// First substitute any Golang template variables passed in via
+		// -x or the ones already provided, Checksum and Server
+		var byt []byte
+		buf := bytes.NewBuffer(byt)
+		err = tmpl.Execute(buf, self(server, string(chk)))
+		if err != nil {
+			return false, errors.Wrap(err, "execute template")
+		}
+		cmd = string(buf.Bytes())
+
+		// Now substitute any variables designated by a '$'
+		cmd = substituteVariables(cmds, cmd)
+
+		log.Println("running:", cmd)
+		c := exec.Command("sh", "-c", cmd)
+		out, err := c.CombinedOutput()
+		if err != nil {
+			if execIf {
+				// TODO log if verbose
+				return false, nil
+			}
+			err = fmt.Errorf("%s: %q", err, string(out))
+			return false, err
+		}
+		// TODO log if verbose
+		log.Println(string(out))
+	}
+	return true, nil
+}
+
+// parseFlags and validate them.
 func parseFlags() (flags, error) {
 	f := flag.NewFlagSet("flags", flag.ExitOnError)
 	upfile := f.String("u", "Upfile", "path to upfile")
+	directory := f.String("d", ".", "directory for checksum")
 	limit := f.String("l", "", "limit to specific services")
+	serial := f.Int("n", 1, "how many of each type of server to operate on at a time")
 	vars := f.String("x", "", "comma-separated extra vars for commands, "+
 		"e.g. Color=Red,Font=Small")
-	f.Parse(os.Args)
+	cmd := ""
+	args := os.Args
+	if len(args) == 2 {
+		cmd = os.Args[1]
+		if strings.HasPrefix(cmd, "-") {
+			cmd = ""
+			args = args[1:]
+		} else {
+			args = args[2:]
+		}
+	} else if len(args) > 2 {
+		cmd = os.Args[1]
+		if strings.HasPrefix(cmd, "-") {
+			cmd = ""
+			args = args[1:]
+		} else {
+			args = args[2:]
+		}
+	}
+	f.Parse(args)
 	lim := map[up.InvName]struct{}{}
 	lims := strings.Split(*limit, ",")
 	if len(lims) > 0 && lims[0] != "" {
@@ -77,45 +317,145 @@ func parseFlags() (flags, error) {
 		extraVars[vals[0]] = vals[1]
 	}
 	flgs := flags{
-		Upfile: *upfile,
-		Limit:  lim,
-		Vars:   extraVars,
+		Limit:     lim,
+		Upfile:    *upfile,
+		Serial:    *serial,
+		Directory: *directory,
+		Command:   up.CmdName(cmd),
 	}
 	return flgs, nil
 }
 
+func makeBatches(conf *up.Config, max int) (batch, error) {
+	batches := batch{}
+	for invName, servers := range conf.Inventory {
+		if max == 0 {
+			batches[invName] = [][]string{servers}
+			continue
+		}
+		b := batches[invName]
+		b = [][]string{}
+		for _, srv := range servers {
+			b = appendToBatch(b, srv, max)
+		}
+		batches[invName] = b
+	}
+	if len(batches) == 0 {
+		return nil, errors.New("empty batches, nothing to do")
+	}
+	return batches, nil
+}
+
+// appendToBatch adds to the existing last batch if smaller than the max size.
+// Otherwise it creates and appends a new batch to the end.
+func appendToBatch(b [][]string, srv string, max int) [][]string {
+	if len(b) == 0 {
+		return [][]string{{srv}}
+	}
+	last := b[len(b)-1]
+	if len(last) >= max {
+		return append(b, []string{srv})
+	}
+	b[len(b)-1] = append(last, srv)
+	return b
+}
+
+func self(server, checksum string) tmplData {
+	return tmplData{
+		Server:   server,
+		Checksum: checksum,
+	}
+}
+
+func calcChecksum(dir string) (string, error) {
+	files := []string{}
+	err := filepath.Walk(dir, func(pth string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		name := info.Name()
+		if strings.HasPrefix(name, ".") && name != "." {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+		files = append(files, pth)
+		return nil
+	})
+	if err != nil {
+		return "", errors.Wrap(err, "walk filepath")
+	}
+	h := sha256.New()
+	for _, pth := range files {
+		fi, err := os.Open(pth)
+		if err != nil {
+			return "", errors.Wrap(err, "open file")
+		}
+		if _, err = io.Copy(h, fi); err != nil {
+			fi.Close()
+			return "", errors.Wrap(err, "copy file")
+		}
+		if err = fi.Close(); err != nil {
+			return "", errors.Wrap(err, "close file")
+		}
+	}
+	sum := h.Sum(nil)
+	if len(sum) == 0 {
+		return "", errors.New("empty checksum")
+	}
+	return base64.URLEncoding.EncodeToString(sum), nil
+}
+
+func randomizeOrder(ss []string) []string {
+	out := make([]string, len(ss))
+	perm := rand.Perm(len(ss))
+	for i, p := range perm {
+		out[i] = ss[p]
+	}
+	return out
+}
+
+// substituteVariables recursively.
+func substituteVariables(cmds map[up.CmdName]*up.Cmd, cmd string) string {
+	fields := strings.Fields(cmd)
+	for i, f := range fields {
+		if !strings.HasPrefix(f, "$") {
+			continue
+		}
+
+		// If the command doesn't exist, skip it (presumably
+		// it's defined in their environment or some error will
+		// occur when you try to run it)
+		f = strings.TrimPrefix(f, "$")
+		replace, exist := cmds[up.CmdName(f)]
+		if !exist {
+			continue
+		}
+
+		// At this point the command does exist. Ensure that anything
+		// being replaced also has variable substitutions.
+		for i, ex := range replace.Execs {
+			replace.Execs[i] = substituteVariables()
+		}
+
+		// Insert the desired command into the array and break out of
+		// the loop. Insert is from
+		// https://github.com/golang/go/wiki/SliceTricks#insert
+		fields = append(fields, replace.Execs...)
+		copy(fields[i+1:], fields[i:])
+		for j, ex := range replace.Execs {
+			fields[i+j] = ex
+		}
+		break
+	}
+	return strings.Join(fields, "\n")
+}
+
 /*
-	upfileData := map[string]map[serviceType]*serviceConfig{}
-	if _, err = toml.DecodeFile(flgs.Upfile, &upfileData); err != nil {
-		errLog.Fatal(errors.Wrap(err, "decode toml"))
-	}
-
-	services, exists := upfileData[flgs.Env]
-	if !exists {
-		err = fmt.Errorf("environment %s not in %s", flgs.Env, flgs.Upfile)
-		errLog.Fatal(err)
-	}
-	if err = validateLimits(flgs.Limit, services, flgs.Env); err != nil {
-		errLog.Fatal(errors.Wrap(err, "validate limits"))
-	}
-	conf := &configuration{Services: services, Flags: flgs}
-
-	// Multiple batches for rolling deploy
-	batches, err := makeBatches(conf.Services, conf.Flags.Limit)
-	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "make batches"))
-	}
-	if conf.Flags.Verbose {
-		log.Printf("got batches: %s\n", batches)
-	}
-
-	// checksums maps each filepath to a sha256 checksum
-	log.Printf("calculating checksums...\n\n")
-	checksums, err := calcChecksums(conf.Services, conf.Flags.Limit)
-	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "calc checksum"))
-	}
-
 	// Bring up each service type in parallel
 	done := make(chan bool, len(batches))
 	succeeds, fails := []string{}, []result{}
@@ -453,152 +793,7 @@ func startBatch(
 }
 
 
-func validateLimits(
-	limits map[serviceType]struct{},
-	services map[serviceType]*serviceConfig,
-	env string,
-) error {
-	for serviceName, _ := range limits {
-		if _, exists := services[serviceName]; !exists {
-			return fmt.Errorf(
-				"no service named %s in %s", serviceName, env)
-		}
-	}
-	return nil
-}
 
-func calcDirChecksum(dir string) ([]byte, error) {
-	files := []string{}
-	err := filepath.Walk(dir, func(pth string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		name := info.Name()
-		if strings.HasPrefix(name, ".") && name != "." {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if info.IsDir() || !info.Mode().IsRegular() {
-			return nil
-		}
-		files = append(files, pth)
-		return nil
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "walk filepath")
-	}
-	h := sha256.New()
-	for _, pth := range files {
-		fi, err := os.Open(pth)
-		if err != nil {
-			return nil, errors.Wrap(err, "open file")
-		}
-		if _, err = io.Copy(h, fi); err != nil {
-			fi.Close()
-			return nil, errors.Wrap(err, "copy file")
-		}
-		if err = fi.Close(); err != nil {
-			return nil, errors.Wrap(err, "close file")
-		}
-	}
-	sum := h.Sum(nil)
-	if len(sum) == 0 {
-		return nil, errors.New("empty checksum")
-	}
-	return sum, nil
-}
 
-func randomizeOrder(ss []string) []string {
-	out := make([]string, len(ss))
-	perm := rand.Perm(len(ss))
-	for i, p := range perm {
-		out[i] = ss[p]
-	}
-	return out
-}
 
-func makeBatches(
-	conf map[serviceType]*serviceConfig,
-	limit map[serviceType]struct{},
-) (batch, error) {
-	batches := batch{}
-	for typ, service := range conf {
-		if len(limit) > 0 {
-			if _, exist := limit[typ]; !exist {
-				continue
-			}
-		}
-		if len(service.IPs) == 0 {
-			return nil, fmt.Errorf("no ips for %s", typ)
-		}
-		service.IPs = randomizeOrder(service.IPs)
-		if service.Serial == 0 {
-			batches[typ] = [][]string{service.IPs}
-			continue
-		}
-		batchIdx := 0
-		max := int(service.Serial)
-		for _, ip := range service.IPs {
-			if len(batches[typ]) <= batchIdx {
-				bat := batches[typ]
-				batches[typ] = append(bat, []string{ip})
-			} else {
-				bat := batches[typ][batchIdx]
-				batches[typ][batchIdx] = append(bat, ip)
-			}
-			if len(batches[typ][batchIdx]) >= max {
-				batchIdx++
-			}
-		}
-	}
-	if len(batches) == 0 {
-		return nil, errors.New("empty batches, nothing to do")
-	}
-	return batches, nil
-}
-
-func calcChecksums(
-	conf map[serviceType]*serviceConfig,
-	limit map[serviceType]struct{},
-) (map[string]string, error) {
-	chks := map[string]string{}
-	for typ, service := range conf {
-		if len(limit) > 0 {
-			if _, exist := limit[typ]; !exist {
-				continue
-			}
-		}
-		if service.VersionCheckURL == "" && service.VersionCheckCmd == "" {
-			if service.VersionCheckDir != "" {
-				log.Printf("warn: VersionCheckDir defined on %s, but missing VersionCheckURL and VersionCheckCmd", typ)
-				continue
-			}
-		}
-		dir := service.VersionCheckDir
-		if dir == "" {
-			dir = "."
-		}
-		if _, exist := chks[dir]; !exist {
-			checksum, err := calcDirChecksum(dir)
-			if err != nil {
-				return nil, errors.Wrap(err, "calc dir checksum")
-			}
-			chks[dir] = base64.URLEncoding.EncodeToString(checksum)
-		}
-	}
-	return chks, nil
-}
-
-func addSelf(c *configuration, user, ip, checksum string) *selfConfig {
-	sc := &selfConfig{
-		Config:   c,
-		IP:       ip,
-		User:     user,
-		Checksum: checksum,
-		Remote:   user + "@" + ip,
-	}
-	return sc
-}
 */

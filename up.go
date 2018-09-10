@@ -19,9 +19,12 @@ type Config struct {
 	// Commands available to run grouped by command name.
 	Commands map[CmdName]*Cmd
 
-	indented bool
-	text     string
+	// DefaultCommand is the first command in the Upfile.
+	DefaultCommand CmdName
+
 	lex      *lexer
+	text     string
+	indented bool
 }
 
 // Cmd to run conditionally if the conditions listed in ExecIf all exit with
