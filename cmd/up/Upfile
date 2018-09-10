@@ -7,6 +7,8 @@ inventory staging
 
 deploy check_health
 	echo 'deploy'
+	exit 1
 
 check_health
 	echo 'check_health'
+	exit 1
