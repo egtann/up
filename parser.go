@@ -100,6 +100,9 @@ Outer:
 	if len(inv) == 0 {
 		return errors.New("empty inventory")
 	}
+	if len(t.Inventory) == 0 {
+		t.DefaultEnvironment = inv[0]
+	}
 	t.Inventory[curInvName] = inv
 	return t.nextControl(tkn)
 }

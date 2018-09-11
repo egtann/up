@@ -22,6 +22,9 @@ type Config struct {
 	// DefaultCommand is the first command in the Upfile.
 	DefaultCommand CmdName
 
+	// DefaultEnvironment is the first inventory in the Upfile.
+	DefaultEnvironment string
+
 	lex      *lexer
 	text     string
 	indented bool

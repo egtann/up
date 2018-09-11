@@ -233,6 +233,7 @@ func runExec(
 	servers []string,
 	execIf bool,
 ) (bool, error) {
+	// TODO remove golang templates
 	tmpl, err := template.New("").Parse(cmd)
 	if err != nil {
 		return false, errors.Wrap(err, "parse template")
@@ -247,6 +248,9 @@ func runExec(
 			return false, errors.Wrap(err, "execute template")
 		}
 		cmd = string(buf.Bytes())
+
+		// TODO ensure that no cycles are present with depth-first
+		// search
 
 		// Now substitute any variables designated by a '$'
 		cmd = substituteVariables(cmds, cmd)
@@ -421,6 +425,8 @@ func randomizeOrder(ss []string) []string {
 
 // substituteVariables recursively.
 func substituteVariables(cmds map[up.CmdName]*up.Cmd, cmd string) string {
+	// find first "$" that doesn't have a leading "\"
+
 	fields := strings.Fields(cmd)
 	for i, f := range fields {
 		if !strings.HasPrefix(f, "$") {
@@ -433,13 +439,14 @@ func substituteVariables(cmds map[up.CmdName]*up.Cmd, cmd string) string {
 		f = strings.TrimPrefix(f, "$")
 		replace, exist := cmds[up.CmdName(f)]
 		if !exist {
+			log.Printf("warn: $%s is undefined in Upfile\n", f)
 			continue
 		}
 
 		// At this point the command does exist. Ensure that anything
 		// being replaced also has variable substitutions.
 		for i, ex := range replace.Execs {
-			replace.Execs[i] = substituteVariables()
+			replace.Execs[i] = substituteVariables(cmds, ex)
 		}
 
 		// Insert the desired command into the array and break out of
