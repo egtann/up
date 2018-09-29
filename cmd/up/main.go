@@ -88,7 +88,8 @@ func main() {
 		}
 	}
 	if len(flgs.Limit) == 0 {
-		log.Printf("running %s on all\n", conf.DefaultCommand)
+		log.Printf("running %s on %s\n", conf.DefaultCommand,
+			conf.DefaultEnvironment)
 	} else {
 		lims := []string{}
 		for lim := range flgs.Limit {
@@ -459,7 +460,7 @@ func substituteVariables(cmds map[up.CmdName]*up.Cmd, cmd string) string {
 		}
 		break
 	}
-	return strings.Join(fields, "\n")
+	return strings.Join(fields, " ")
 }
 
 /*

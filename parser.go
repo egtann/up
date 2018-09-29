@@ -3,7 +3,6 @@ package up
 import (
 	"errors"
 	"fmt"
-	"log"
 )
 
 // parse free-form input to build a Config tree reflecting an Upfile's
@@ -101,7 +100,7 @@ Outer:
 		return errors.New("empty inventory")
 	}
 	if len(t.Inventory) == 0 {
-		t.DefaultEnvironment = inv[0]
+		t.DefaultEnvironment = curInvName
 	}
 	t.Inventory[curInvName] = inv
 	return t.nextControl(tkn)
@@ -152,7 +151,6 @@ Outer2:
 Outer:
 	for {
 		tkn = t.lex.nextToken()
-		log.Println("tkn", tkn)
 		switch tkn.typ {
 		case tokenNewline:
 			indented = false
