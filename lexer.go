@@ -18,6 +18,7 @@ const (
 	tokenTab                      // Tab '\t'
 	tokenNewline                  // Line break
 	tokenText                     // Plaintext
+	tokenComment                  // Pound '#'
 
 	// Keywords follow
 	tokenKeyword   // Used only to delimit keywords
@@ -141,6 +142,8 @@ Outer:
 		switch {
 		case r == eof:
 			break Outer
+		case r == '#':
+			l.emit(tokenComment)
 		case text == "inventory":
 			l.backup()
 			l.emit(tokenInventory)

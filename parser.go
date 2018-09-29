@@ -76,6 +76,9 @@ Outer:
 	for {
 		tkn = t.lex.nextToken()
 		switch tkn.typ {
+		case tokenComment:
+			skipLine(t.lex)
+			fallthrough
 		case tokenNewline:
 			indented = false
 			continue
@@ -152,6 +155,10 @@ Outer:
 	for {
 		tkn = t.lex.nextToken()
 		switch tkn.typ {
+		case tokenComment:
+			skipLine(t.lex)
+			indented = false
+			continue
 		case tokenNewline:
 			indented = false
 			if line != "" {
@@ -191,4 +198,17 @@ Outer:
 	}
 	t.Commands[name] = &cmd
 	return t.nextControl(tkn)
+}
+
+func skipLine(l *lexer) {
+Outer:
+	for {
+		tkn := l.nextToken()
+		switch tkn.typ {
+		case tokenNewline, tokenEOF:
+			break Outer
+		default:
+			continue
+		}
+	}
 }
