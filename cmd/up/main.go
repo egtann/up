@@ -202,10 +202,20 @@ func runExecIfs(
 		return
 	}
 	for _, cmdLine := range cmd.Execs {
-		_, err := runExec(cmds, cmdLine, chk, servers, false)
+		cmdLine, err := substituteVariables(cmds, cmdLine)
 		if err != nil {
 			send(ch, err, servers)
 			return
+		}
+
+		// We may have substituted a variable with a multi-line command
+		cmdLines := strings.SplitN(cmdLine, "\n", -1)
+		for _, cmdLine := range cmdLines {
+			_, err = runExec(cmds, cmdLine, chk, servers, false)
+			if err != nil {
+				send(ch, err, servers)
+				return
+			}
 		}
 	}
 	send(ch, nil, servers)
