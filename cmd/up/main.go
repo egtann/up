@@ -133,7 +133,8 @@ func main() {
 				ch := make(chan result, len(srvGroup))
 				srvGroup = randomizeOrder(srvGroup)
 				cmd := conf.Commands[conf.DefaultCommand]
-				runExecIfs(ch, conf.Commands, cmd, chk, srvGroup)
+				cmds := copyCommands(conf.Commands)
+				runExecIfs(ch, cmds, cmd, chk, srvGroup)
 				for i := 0; i < len(srvGroup); i++ {
 					res := <-ch
 					if res.err == nil {
@@ -174,7 +175,7 @@ func runExecIfs(
 	chk string,
 	servers []string,
 ) {
-	send := func(ch chan result, err error, servers []string) {
+	send := func(ch chan<- result, err error, servers []string) {
 		for _, srv := range servers {
 			ch <- result{server: srv, err: err}
 		}
@@ -195,7 +196,7 @@ func runExecIfs(
 			}
 		}
 	}
-	if !needToRun {
+	if !needToRun && len(cmd.ExecIfs) > 0 {
 		for _, srv := range servers {
 			ch <- result{server: srv}
 		}
@@ -229,32 +230,61 @@ func runExec(
 	execIf bool,
 ) (bool, error) {
 	cmds["checksum"] = &up.Cmd{Execs: []string{chk}}
+	ch := make(chan runResult, len(servers))
 	for _, server := range servers {
-		// TODO ensure that no cycles are present with depth-first
-		// search
-
-		// Now substitute any variables designated by a '$'
-		cmds["server"] = &up.Cmd{Execs: []string{server}}
-		cmd, err := substituteVariables(cmds, cmd)
-		if err != nil {
-			return false, errors.Wrap(err, "substitute")
-		}
-
-		log.Printf("[%s] %s\n", server, cmd)
-		c := exec.Command("sh", "-c", cmd)
-		out, err := c.CombinedOutput()
-		if err != nil {
-			if execIf {
-				// TODO log if verbose
-				return false, nil
-			}
-			err = fmt.Errorf("%s: %q", err, string(out))
-			return false, err
-		}
-		// TODO log if verbose
-		// log.Println(string(out))
+		go run(ch, cmds, cmd, chk, server, execIf)
 	}
-	return true, nil
+	var err error
+	pass := true
+	for i := 0; i < len(servers); i++ {
+		res := <-ch
+		pass = pass && res.pass
+		if res.error != nil {
+			err = res.error
+		}
+	}
+	return pass, err
+}
+
+type runResult struct {
+	pass  bool
+	error error
+}
+
+func run(
+	ch chan<- runResult,
+	cmds map[up.CmdName]*up.Cmd,
+	cmd, chk, server string,
+	execIf bool,
+) {
+	// TODO ensure that no cycles are present with depth-first
+	// search
+
+	// Now substitute any variables designated by a '$'
+	cmds["server"] = &up.Cmd{Execs: []string{server}}
+	cmd, err := substituteVariables(cmds, cmd)
+	if err != nil {
+		err = errors.Wrap(err, "substitute")
+		ch <- runResult{pass: false, error: err}
+		return
+	}
+
+	log.Printf("[%s] %s\n", server, cmd)
+	c := exec.Command("sh", "-c", cmd)
+	out, err := c.CombinedOutput()
+	if err != nil {
+		if execIf {
+			// TODO log if verbose
+			ch <- runResult{pass: false}
+			return
+		}
+		err = fmt.Errorf("%s: %q", err, string(out))
+		ch <- runResult{pass: false, error: err}
+		return
+	}
+	// TODO log if verbose
+	// log.Println(string(out))
+	ch <- runResult{pass: true}
 }
 
 // parseFlags and validate them.
@@ -430,4 +460,12 @@ func substituteVariables(
 		cmd = tmp
 	}
 	return "", errors.New("possible cycle detected")
+}
+
+func copyCommands(m1 map[up.CmdName]*up.Cmd) map[up.CmdName]*up.Cmd {
+	m2 := map[up.CmdName]*up.Cmd{}
+	for k, v := range m1 {
+		m2[k] = v
+	}
+	return m2
 }
