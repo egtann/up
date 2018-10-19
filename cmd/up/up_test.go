@@ -4,77 +4,109 @@ import (
 	"fmt"
 	"log"
 	"testing"
+
+	"github.com/egtann/up"
 )
 
 func TestMakeBatches(t *testing.T) {
 	t.Parallel()
 	tcs := []struct {
-		have map[serviceType]*serviceConfig
-		want map[serviceType][][]string
+		serial int
+		have   map[up.InvName][]string
+		want   batch
 	}{
 		{
-			have: map[serviceType]*serviceConfig{
-				"srv1": &serviceConfig{
-					IPs:    []string{"a", "b", "c"},
-					Serial: 1,
-				},
+			serial: 1,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
 			},
-			want: map[serviceType][][]string{
+			want: batch{
 				"srv1": [][]string{{"a"}, {"b"}, {"c"}},
 			},
 		},
 		{
-			have: map[serviceType]*serviceConfig{
-				"srv1": &serviceConfig{
-					IPs:    []string{"a", "b", "c"},
-					Serial: 1,
-				},
-				"srv2": &serviceConfig{
-					IPs:    []string{"d", "e"},
-					Serial: 3,
-				},
+			serial: 3,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
+				"srv2": []string{"d", "e"},
 			},
-			want: map[serviceType][][]string{
-				"srv1": [][]string{{"a"}, {"b"}, {"c"}},
-				"srv2": [][]string{{"d", "e"}},
-			},
-		},
-		{
-			have: map[serviceType]*serviceConfig{
-				"srv1": &serviceConfig{
-					IPs:    []string{"a", "b", "c"},
-					Serial: 0,
-				},
-				"srv2": &serviceConfig{
-					IPs:    []string{"d", "e"},
-					Serial: 2,
-				},
-			},
-			want: map[serviceType][][]string{
+			want: batch{
 				"srv1": [][]string{{"a", "b", "c"}},
 				"srv2": [][]string{{"d", "e"}},
 			},
 		},
 		{
-			have: map[serviceType]*serviceConfig{
-				"srv1": &serviceConfig{
-					IPs:    []string{"a", "b", "c"},
-					Serial: 2,
-				},
-				"srv2": &serviceConfig{
-					IPs:    []string{"d", "e", "f", "g"},
-					Serial: 3,
-				},
+			serial: 0,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
+				"srv2": []string{"d", "e"},
 			},
-			want: map[serviceType][][]string{
+			want: batch{
+				"srv1": [][]string{{"a", "b", "c"}},
+				"srv2": [][]string{{"d", "e"}},
+			},
+		},
+		{
+			serial: 2,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
+				"srv2": []string{"d", "e", "f", "g"},
+			},
+			want: batch{
 				"srv1": [][]string{{"a", "b"}, {"c"}},
+				"srv2": [][]string{{"d", "e"}, {"f", "g"}},
+			},
+		},
+		{
+			serial: 3,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
+				"srv2": []string{"d", "e", "f", "g"},
+			},
+			want: batch{
+				"srv1": [][]string{{"a", "b", "c"}},
 				"srv2": [][]string{{"d", "e", "f"}, {"g"}},
+			},
+		},
+		{
+			serial: 10,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
+				"srv2": []string{"d", "e", "f", "g"},
+			},
+			want: batch{
+				"srv1": [][]string{{"a", "b", "c"}},
+				"srv2": [][]string{{"d", "e", "f", "g"}},
+			},
+		},
+		{
+			serial: 2,
+			have: map[up.InvName][]string{
+				"srv1": []string{"a", "b", "c"},
+				"srv2": []string{"d", "e", "f", "g"},
+				"srv3": []string{"d", "e"},
+				"srv4": []string{"h", "j"},
+				"srv5": []string{"k", "i"},
+				"srv6": []string{"l", "m", "n"},
+				"srv7": []string{"o"},
+				"srv8": []string{"p", "q", "r", "s", "t", "u", "v"},
+			},
+			want: batch{
+				"srv1": [][]string{{"a", "b"}, {"c"}},
+				"srv2": [][]string{{"d", "e"}, {"f", "g"}},
+				"srv3": [][]string{{"d", "e"}},
+				"srv4": [][]string{{"h", "j"}},
+				"srv5": [][]string{{"k", "i"}},
+				"srv6": [][]string{{"l", "m"}, {"n"}},
+				"srv7": [][]string{{"o"}},
+				"srv8": [][]string{{"p", "q"}, {"r", "s"}, {"t", "u"}, {"v"}},
 			},
 		},
 	}
 	for i, tc := range tcs {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			batches, err := makeBatches(tc.have)
+			conf := &up.Config{Inventory: tc.have}
+			batches, err := makeBatches(conf, tc.serial)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,28 +119,6 @@ func TestMakeBatches(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestValidateLimits(t *testing.T) {
-	t.Parallel()
-	limits := map[serviceType]struct{}{
-		"srv1": {},
-		"srv2": {},
-	}
-	services := map[serviceType]*serviceConfig{
-		"srv1": nil,
-		"srv2": nil,
-	}
-	const env = "test"
-	if err := validateLimits(limits, services, env); err != nil {
-		t.Fatal(err)
-	}
-	services = map[serviceType]*serviceConfig{
-		"srv1": nil,
-	}
-	if err := validateLimits(limits, services, env); err == nil {
-		t.Fatal("expected error, got none")
 	}
 }
 

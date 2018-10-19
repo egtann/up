@@ -126,22 +126,23 @@ func main() {
 
 	// For each batch, run the ExecIfs and run Execs if necessary.
 	done := make(chan bool, len(batches))
-	succeeds, fails := []string{}, []result{}
+	succeeds := []string{}
 	for _, srvBatch := range batches {
 		go func(srvBatch [][]string) {
 			for _, srvGroup := range srvBatch {
 				ch := make(chan result, len(srvGroup))
 				srvGroup = randomizeOrder(srvGroup)
 				cmd := conf.Commands[conf.DefaultCommand]
-				cmds := copyCommands(conf.Commands)
-				runExecIfs(ch, cmds, cmd, chk, srvGroup)
+				runExecIfs(ch, conf.Commands, cmd, chk, srvGroup)
 				for i := 0; i < len(srvGroup); i++ {
 					res := <-ch
-					if res.err == nil {
-						succeeds = append(succeeds, res.server)
-					} else {
-						fails = append(fails, res)
+					if res.err != nil {
+						// Crash as soon as anything
+						// fails
+						errLog.Fatal(res.err)
+						os.Exit(1)
 					}
+					succeeds = append(succeeds, res.server)
 				}
 				close(ch)
 			}
@@ -151,21 +152,7 @@ func main() {
 	for i := 0; i < len(batches); i++ {
 		<-done
 	}
-	if len(fails) == 0 {
-		log.Println("success")
-		os.Exit(0)
-	}
-	log.Printf("\nfailed to start some services\n\n")
-	log.Println("succeeded:")
-	for _, s := range succeeds {
-		log.Println(s)
-	}
-	log.Printf("\n\n")
-	log.Println("failed:")
-	for _, f := range fails {
-		log.Printf("%s: %s\n", f.server, f.err)
-	}
-	os.Exit(1)
+	log.Println("success")
 }
 
 func runExecIfs(
@@ -261,6 +248,7 @@ func run(
 	// search
 
 	// Now substitute any variables designated by a '$'
+	cmds = copyCommands(cmds)
 	cmds["server"] = &up.Cmd{Execs: []string{server}}
 	cmd, err := substituteVariables(cmds, cmd)
 	if err != nil {
