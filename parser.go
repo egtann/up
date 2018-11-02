@@ -201,12 +201,11 @@ Outer:
 }
 
 func skipLine(l *lexer) {
-Outer:
 	for {
 		tkn := l.nextToken()
 		switch tkn.typ {
 		case tokenNewline, tokenEOF:
-			break Outer
+			return
 		default:
 			continue
 		}
