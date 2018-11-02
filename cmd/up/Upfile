@@ -1,12 +1,28 @@
 inventory production
 	1.1.1.1
 	1.1.1.2
+	1.1.2.3
+	1.1.2.4
+	1.1.2.5
+	1.1.2.6
+	1.1.2.7
+	1.1.2.8
+	1.1.2.9
 
 inventory staging
 	www.example.com
 
-deploy check_health
-	echo 'deploy'
+deploy check_health check_version echo_out
+	echo '$remote deploy'
 
 check_health
-	echo 'check_health'
+	echo '$remote check_health'
+
+check_version
+	echo '$remote check_version'
+
+echo_out
+	echo '$remote out'
+
+remote
+	ssh egtann@$server
