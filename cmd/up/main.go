@@ -82,7 +82,7 @@ func main() {
 	}
 	if len(flgs.Limit) == 0 {
 		flgs.Limit[conf.DefaultEnvironment] = struct{}{}
-		log.Printf("running %s on %s\n", conf.DefaultCommand,
+		log.Printf("running %s on default %s\n", conf.DefaultCommand,
 			conf.DefaultEnvironment)
 	} else {
 		lims := []string{}
@@ -93,11 +93,17 @@ func main() {
 		log.Printf("running %s on %s\n", conf.DefaultCommand, tmp)
 	}
 
+	if _, exist := conf.Inventory["all"]; exist {
+		errLog.Fatal(errors.New("reserved keyword 'all' cannot be inventory name"))
+	}
+
 	// Remove any unnecessary inventory. All remaining defined inventory
 	// will be used.
-	for invName := range conf.Inventory {
-		if _, exist := flgs.Limit[invName]; !exist {
-			delete(conf.Inventory, invName)
+	if _, exist := flgs.Limit["all"]; !exist {
+		for invName := range conf.Inventory {
+			if _, exist := flgs.Limit[invName]; !exist {
+				delete(conf.Inventory, invName)
+			}
 		}
 	}
 
@@ -106,6 +112,8 @@ func main() {
 	if len(flgs.Limit) > len(conf.Inventory) {
 		// TODO improve error message to specify which limits are
 		// undefined
+		log.Printf("limit: %+v\n", flgs.Limit)
+		log.Printf("inventory: %+v\n", conf.Inventory)
 		errLog.Fatal(errors.New("undefined limits"))
 	}
 
@@ -126,7 +134,6 @@ func main() {
 
 	// For each batch, run the ExecIfs and run Execs if necessary.
 	done := make(chan bool, len(batches))
-	succeeds := []string{}
 	for _, srvBatch := range batches {
 		go func(srvBatch [][]string) {
 			for _, srvGroup := range srvBatch {
@@ -142,9 +149,7 @@ func main() {
 						errLog.Fatal(res.err)
 						os.Exit(1)
 					}
-					succeeds = append(succeeds, res.server)
 				}
-				close(ch)
 			}
 			done <- true
 		}(srvBatch)
@@ -171,6 +176,7 @@ func runExecIfs(
 	for _, execIf := range cmd.ExecIfs {
 		// TODO should this also enforce ExecIfs? Probably...
 		// TODO this should handle errors correctly through the channel
+		cmds := copyCommands(cmds)
 		steps := cmds[execIf].Execs
 		for _, step := range steps {
 			ok, err := runExec(cmds, step, chk, servers, true)
@@ -216,6 +222,7 @@ func runExec(
 	servers []string,
 	execIf bool,
 ) (bool, error) {
+	cmds = copyCommands(cmds)
 	cmds["checksum"] = &up.Cmd{Execs: []string{chk}}
 	ch := make(chan runResult, len(servers))
 	for _, server := range servers {
@@ -306,7 +313,17 @@ func parseFlags() (flags, error) {
 	f.Parse(args)
 	lim := map[up.InvName]struct{}{}
 	lims := strings.Split(*limit, ",")
-	if len(lims) > 0 && lims[0] != "" {
+	if len(lims) > 0 {
+		all := false
+		for _, service := range lims {
+			if service == "all" {
+				lim["all"] = struct{}{}
+				all = true
+			}
+		}
+		if all && len(lims) > 1 {
+			return flags{}, errors.New("cannot use 'all' limit alongside others")
+		}
 		for _, service := range lims {
 			lim[up.InvName(service)] = struct{}{}
 		}
