@@ -266,19 +266,17 @@ func run(
 
 	log.Printf("[%s] %s\n", server, cmd)
 	c := exec.Command("sh", "-c", cmd)
-	out, err := c.CombinedOutput()
-	if err != nil {
+	c.Stdout = os.Stdout
+	c.Stdin = os.Stdin
+	if err = c.Run(); err != nil {
 		if execIf {
 			// TODO log if verbose
 			ch <- runResult{pass: false}
 			return
 		}
-		err = fmt.Errorf("%s: %q", err, string(out))
 		ch <- runResult{pass: false, error: err}
 		return
 	}
-	// TODO log if verbose
-	// log.Println(string(out))
 	ch <- runResult{pass: true}
 }
 
