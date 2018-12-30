@@ -33,6 +33,12 @@ func parse(text string) (*Config, error) {
 			}
 		}
 	}
+	if len(t.Commands) == 0 {
+		return nil, errors.New("no commands")
+	}
+	if len(t.Inventory) == 0 {
+		return nil, errors.New("no inventory")
+	}
 	return t, nil
 }
 
@@ -95,6 +101,8 @@ Outer:
 			inv = append(inv, tkn.val)
 		case tokenInventory:
 			break Outer
+		case tokenEOF:
+			return errors.New("unexpected eof before commands")
 		default:
 			return fmt.Errorf("unexpected 1 %s", tkn.val)
 		}

@@ -1,6 +1,12 @@
-inventory:
-	production:
-		1.1.1.1
-	staging:
-		www.example.com
-		1.1.1.2
+inventory production
+	1.1.1.1
+
+inventory staging
+	www.example.com
+	1.1.1.2
+
+deploy if1
+	echo 'hello world'
+
+if1
+	echo 'if1'

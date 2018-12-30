@@ -1,8 +1,15 @@
 package up
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"io/ioutil"
+	"path/filepath"
+	"testing"
+)
 
 func TestParse(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		haveFile string
 		want     *Config
@@ -16,12 +23,21 @@ func TestParse(t *testing.T) {
 				"production": []string{"1.1.1.1"},
 				"staging":    []string{"www.example.com", "1.1.1.2"},
 			},
+			Commands: map[CmdName]*Cmd{
+				"deploy": &Cmd{
+					ExecIfs: []CmdName{"if1"},
+					Execs:   []string{"echo 'hello world'"},
+				},
+				"if1": &Cmd{Execs: []string{"echo 'if1'"}},
+			},
+			DefaultCommand:     "deploy",
+			DefaultEnvironment: "production",
 		}},
 	}
 	for _, tc := range tests {
-		tc.Run(tc.haveFile, func(t *testing.T) {
+		t.Run(tc.haveFile, func(t *testing.T) {
 			pth := filepath.Join("testdata", tc.haveFile)
-			byt, err := ioutil.ReadAll(pth)
+			byt, err := ioutil.ReadFile(pth)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -29,12 +45,22 @@ func TestParse(t *testing.T) {
 			conf, err := Parse(rdr)
 			if err != nil {
 				if tc.wantErr {
-					continue
+					return
 				}
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(conf, tc.want) {
-				t.Fatalf("expected %+v, got %+v", tc.want, conf)
+			byt, err = json.Marshal(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(byt)
+			byt, err = json.Marshal(tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := string(byt)
+			if got != want {
+				t.Fatalf("expected: %s\ngot: %s", want, got)
 			}
 		})
 	}

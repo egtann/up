@@ -2,7 +2,6 @@ package up
 
 import (
 	"net/http"
-	"testing"
 )
 
 func ExampleGetCalculatedChecksum() {
@@ -15,7 +14,4 @@ func ExampleGetCalculatedChecksum() {
 		}
 		w.Write(check)
 	})
-}
-
-func TestSubstituteVariables(t *testing.T) {
 }
