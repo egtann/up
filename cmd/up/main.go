@@ -140,7 +140,7 @@ func main() {
 				ch := make(chan result, len(srvGroup))
 				srvGroup = randomizeOrder(srvGroup)
 				cmd := conf.Commands[conf.DefaultCommand]
-				runExecIfs(ch, conf.Commands, cmd, chk, srvGroup)
+				runExecIfs(ch, flgs.Vars, conf.Commands, cmd, chk, srvGroup)
 				for i := 0; i < len(srvGroup); i++ {
 					res := <-ch
 					if res.err != nil {
@@ -162,6 +162,7 @@ func main() {
 
 func runExecIfs(
 	ch chan result,
+	vars map[string]string,
 	cmds map[up.CmdName]*up.Cmd,
 	cmd *up.Cmd,
 	chk string,
@@ -179,7 +180,7 @@ func runExecIfs(
 		cmds := copyCommands(cmds)
 		steps := cmds[execIf].Execs
 		for _, step := range steps {
-			ok, err := runExec(cmds, step, chk, servers, true)
+			ok, err := runExec(vars, cmds, step, chk, servers, true)
 			if err != nil {
 				send(ch, err, servers)
 				return
@@ -196,7 +197,7 @@ func runExecIfs(
 		return
 	}
 	for _, cmdLine := range cmd.Execs {
-		cmdLine, err := substituteVariables(cmds, cmdLine)
+		cmdLine, err := substituteVariables(vars, cmds, cmdLine)
 		if err != nil {
 			send(ch, err, servers)
 			return
@@ -205,7 +206,7 @@ func runExecIfs(
 		// We may have substituted a variable with a multi-line command
 		cmdLines := strings.SplitN(cmdLine, "\n", -1)
 		for _, cmdLine := range cmdLines {
-			_, err = runExec(cmds, cmdLine, chk, servers, false)
+			_, err = runExec(vars, cmds, cmdLine, chk, servers, false)
 			if err != nil {
 				send(ch, err, servers)
 				return
@@ -217,6 +218,7 @@ func runExecIfs(
 
 // runExec reports whether all execIfs passed and an error if any.
 func runExec(
+	vars map[string]string,
 	cmds map[up.CmdName]*up.Cmd,
 	cmd, chk string,
 	servers []string,
@@ -226,7 +228,7 @@ func runExec(
 	cmds["checksum"] = &up.Cmd{Execs: []string{chk}}
 	ch := make(chan runResult, len(servers))
 	for _, server := range servers {
-		go run(ch, cmds, cmd, chk, server, execIf)
+		go run(ch, vars, cmds, cmd, chk, server, execIf)
 	}
 	var err error
 	pass := true
@@ -247,6 +249,7 @@ type runResult struct {
 
 func run(
 	ch chan<- runResult,
+	vars map[string]string,
 	cmds map[up.CmdName]*up.Cmd,
 	cmd, chk, server string,
 	execIf bool,
@@ -257,7 +260,7 @@ func run(
 	// Now substitute any variables designated by a '$'
 	cmds = copyCommands(cmds)
 	cmds["server"] = &up.Cmd{Execs: []string{server}}
-	cmd, err := substituteVariables(cmds, cmd)
+	cmd, err := substituteVariables(vars, cmds, cmd)
 	if err != nil {
 		err = errors.Wrap(err, "substitute")
 		ch <- runResult{pass: false, error: err}
@@ -287,8 +290,6 @@ func parseFlags() (flags, error) {
 	directory := f.String("d", ".", "directory for checksum")
 	limit := f.String("l", "", "limit to specific services")
 	serial := f.Int("n", 1, "how many of each type of server to operate on at a time")
-	vars := f.String("x", "", "comma-separated extra vars for commands, "+
-		"e.g. Color=Red,Font=Small")
 	cmd := ""
 	args := os.Args
 	if len(args) == 2 {
@@ -326,15 +327,15 @@ func parseFlags() (flags, error) {
 			lim[up.InvName(service)] = struct{}{}
 		}
 	}
-	varList := strings.Split(*vars, ",")
 	extraVars := map[string]string{}
-	for _, pair := range varList {
+	for _, pair := range os.Environ() {
 		if len(pair) == 0 {
 			continue
 		}
+		pair = strings.TrimSpace(pair)
 		vals := strings.Split(pair, "=")
 		if len(vals) != 2 {
-			return flags{}, errors.New("invalid extra var")
+			continue
 		}
 		extraVars[vals[0]] = vals[1]
 	}
@@ -344,6 +345,7 @@ func parseFlags() (flags, error) {
 		Serial:    *serial,
 		Directory: *directory,
 		Command:   up.CmdName(cmd),
+		Vars:      extraVars,
 	}
 	return flgs, nil
 }
@@ -437,6 +439,7 @@ func randomizeOrder(ss []string) []string {
 // substituteVariables recursively up to 10 times. After 10 substitutions, this
 // function reports an error.
 func substituteVariables(
+	vars map[string]string,
 	cmds map[up.CmdName]*up.Cmd,
 	cmd string,
 ) (string, error) {
@@ -452,6 +455,10 @@ func substituteVariables(
 		}
 		rep = strings.TrimSpace(rep)
 		replacements = append(replacements, rep)
+	}
+	for name, val := range vars {
+		replacements = append(replacements, "$"+name)
+		replacements = append(replacements, val)
 	}
 	r := strings.NewReplacer(replacements...)
 	for i := 0; i < 10; i++ {

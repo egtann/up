@@ -38,6 +38,14 @@ Up gives you access to 2 reserved, always-available variables in your commands:
 1. `$checksum` represents the md5 checksum of a specified directory (defaults
    to the current directory).
 
+You can also use environment variables, like the following:
+
+```bash
+user=dev up deploy -l production
+```
+
+Access that variable in your Upfile using `$user`.
+
 Running commands on the remote host is as simple as using whatever shell you've
 configured for your local system. See the below example Upfile designed for
 bash, which runs remote commands using ssh:
