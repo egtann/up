@@ -8,7 +8,7 @@ and as a result, more reliable and less prone to bugs.
 ### Install
 
 ```
-$ go get github.com/egtann/up
+$ go get -u github.com/egtann/up/cmd/up
 ```
 
 ### Usage
