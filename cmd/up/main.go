@@ -270,6 +270,7 @@ func run(
 	log.Printf("[%s] %s\n", server, cmd)
 	c := exec.Command("sh", "-c", cmd)
 	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
 	c.Stdin = os.Stdin
 	if err = c.Run(); err != nil {
 		if execIf {
