@@ -1,0 +1,5 @@
+{
+	"10.0.0.1": ["manifest"],
+	"10.0.0.2": ["manifest_2"],
+	"10.0.0.3": ["manifest", "manifest_2"]
+}

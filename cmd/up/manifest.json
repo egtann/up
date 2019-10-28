@@ -1,0 +1,20 @@
+{
+	"Name": "my_app",
+	"Inventory": ["10.0.0.1", "10.0.0.2"],
+	"Files": {
+		"test.txt": {
+			"Remote": "test_remote.txt",
+			"Mod": "600",
+			"Own": "root:root"
+		}
+	},
+	"Deploy": [
+		"sudo systemctl restart \"my_app 2\"",
+		"sleep 5 && $check_health"
+	],
+	"Rsync": "rsync -chazP -e 'ssh -J jump@$jump'",
+	"SSH": "ssh -J jump@$jump",
+	"Vars": {
+		"jump": "10.0.0.3"
+	}
+}

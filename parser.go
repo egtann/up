@@ -5,14 +5,12 @@ import (
 	"fmt"
 )
 
-// parse free-form input to build a Config tree reflecting an Upfile's
-// configuration.
-func parse(text string) (*Config, error) {
+// parseUpfile to build a Config tree.
+func parseUpfile(text string) (*Config, error) {
 	t := &Config{
-		Commands:  map[CmdName]*Cmd{},
-		Inventory: map[InvName][]string{},
-		text:      text,
-		lex:       lex(text),
+		Commands: map[CmdName]*Cmd{},
+		text:     text,
+		lex:      lex(text),
 	}
 	if err := t.parse(); err != nil {
 		t.lex.drain()
@@ -36,9 +34,6 @@ func parse(text string) (*Config, error) {
 	if len(t.Commands) == 0 {
 		return nil, errors.New("no commands")
 	}
-	if len(t.Inventory) == 0 {
-		return nil, errors.New("no inventory")
-	}
 	return t, nil
 }
 
@@ -59,68 +54,8 @@ func (t *Config) nextNonSpace() token {
 	}
 }
 
-func (t *Config) inventoryControl() error {
-	/*
-		inventory production
-			1.1.1.1
-			1.1.2.1
-		inventory staging
-			1.1.2.2
-	*/
-	tkn := t.nextNonSpace()
-	curInvName := InvName(tkn.val)
-	inv := []string{}
-
-	tkn = t.nextNonSpace()
-	if tkn.typ != tokenNewline {
-		return errors.New("expected newline")
-	}
-
-	// For each of the things that follow until a newline
-	var indented bool
-Outer:
-	for {
-		tkn = t.lex.nextToken()
-		switch tkn.typ {
-		case tokenComment:
-			skipLine(t.lex)
-			fallthrough
-		case tokenNewline:
-			indented = false
-			continue
-		case tokenTab:
-			if indented {
-				return errors.New("unexpected double indent")
-			}
-			indented = true
-			continue
-		case tokenText:
-			if !indented {
-				break Outer
-			}
-			inv = append(inv, tkn.val)
-		case tokenInventory:
-			break Outer
-		case tokenEOF:
-			return errors.New("unexpected eof before commands")
-		default:
-			return fmt.Errorf("unexpected 1 %s", tkn.val)
-		}
-	}
-	if len(inv) == 0 {
-		return errors.New("empty inventory")
-	}
-	if len(t.Inventory) == 0 {
-		t.DefaultEnvironment = curInvName
-	}
-	t.Inventory[curInvName] = inv
-	return t.nextControl(tkn)
-}
-
 func (t *Config) nextControl(tkn token) error {
 	switch tkn.typ {
-	case tokenInventory:
-		return t.inventoryControl()
 	case tokenEOF:
 		return nil
 	default:
@@ -205,6 +140,9 @@ Outer:
 		return fmt.Errorf("nothing to exec for %s", name)
 	}
 	t.Commands[name] = &cmd
+	if t.DefaultCommand == "" {
+		t.DefaultCommand = name
+	}
 	return t.nextControl(tkn)
 }
 
