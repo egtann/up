@@ -1,21 +1,16 @@
 package up
 
 import (
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
-
-	"github.com/pkg/errors"
 )
 
-type InvName string
 type CmdName string
 
 // Config represents a parsed Upfile.
 type Config struct {
-	// Inventory of IPs or URLs associated by named groups.
-	Inventory map[InvName][]string
-
 	// Commands available to run grouped by command name.
 	Commands map[CmdName]*Cmd
 
@@ -23,7 +18,7 @@ type Config struct {
 	DefaultCommand CmdName
 
 	// DefaultEnvironment is the first inventory in the Upfile.
-	DefaultEnvironment InvName
+	DefaultEnvironment string
 
 	lex      *lexer
 	text     string
@@ -40,12 +35,12 @@ type Cmd struct {
 	Execs []string
 }
 
-func Parse(rdr io.Reader) (*Config, error) {
+func ParseUpfile(rdr io.Reader) (*Config, error) {
 	byt, err := ioutil.ReadAll(rdr)
 	if err != nil {
-		return nil, errors.Wrap(err, "read all")
+		return nil, fmt.Errorf("read all: %w", err)
 	}
-	return parse(string(byt))
+	return parseUpfile(string(byt))
 }
 
 // GetCalculatedChecksum from a file which was created on deploy and contains
@@ -58,12 +53,12 @@ func GetCalculatedChecksum(filepath string) ([]byte, error) {
 		return []byte{}, nil
 	}
 	if err != nil {
-		return nil, errors.Wrap(err, "open file")
+		return nil, fmt.Errorf("open file: %w", err)
 	}
 	defer fi.Close()
 	byt, err := ioutil.ReadAll(fi)
 	if err != nil {
-		return nil, errors.Wrap(err, "read file")
+		return nil, fmt.Errorf("read file: %w", err)
 	}
 	return byt, nil
 }

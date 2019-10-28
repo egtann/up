@@ -4,6 +4,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,7 +17,6 @@ import (
 	"time"
 
 	"github.com/egtann/up"
-	"github.com/pkg/errors"
 )
 
 type flags struct {
@@ -26,13 +26,16 @@ type flags struct {
 	// or Upfile.bash.toml and Upfile.fish.toml.
 	Upfile string
 
+	// Inventory allows you specify a different inventory name.
+	Inventory string
+
 	// Command to run. Like `make`, an empty Command defaults to the first
 	// command in the Upfile.
 	Command up.CmdName
 
 	// Limit the changed services to those enumerated if the flag is
-	// provided
-	Limit map[up.InvName]struct{}
+	// provided. This holds the tags that will be used.
+	Limit map[string]struct{}
 
 	// Serial determines how many servers of the same type will be operated
 	// on at any one time. This defaults to 1. Use 0 to specify all of
@@ -47,7 +50,7 @@ type flags struct {
 	Vars map[string]string
 }
 
-type batch map[up.InvName][][]string
+type batch map[string][][]string
 
 type result struct {
 	server string
@@ -55,80 +58,107 @@ type result struct {
 }
 
 func main() {
-	errLog := log.New(os.Stdout, "", log.Lshortfile)
 	log.SetFlags(0)
 	rand.Seed(time.Now().UnixNano())
 
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	log.Println("success")
+}
+
+func run() error {
+	errLog := log.New(os.Stdout, "", log.Lshortfile)
+
 	flgs, err := parseFlags()
 	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "parse flags"))
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	fi, err := os.Open(flgs.Upfile)
+	// Open and parse the Upfile
+	upFi, err := os.Open(flgs.Upfile)
 	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "open upfile"))
+		return fmt.Errorf("open upfile: %w", err)
 	}
-	defer fi.Close()
-	conf, err := up.Parse(fi)
+	defer upFi.Close()
+	conf, err := up.ParseUpfile(upFi)
 	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "parse upfile"))
+		return fmt.Errorf("parse upfile: %w", err)
 	}
+
+	// Open and parse the inventory file
+	invFi, err := os.Open(flgs.Inventory)
+	if err != nil {
+		return fmt.Errorf("open inventory: %w", err)
+	}
+	defer invFi.Close()
+	inventory, err := up.ParseInventory(invFi)
+	if err != nil {
+		return fmt.Errorf("parse inventory: %w", err)
+	}
+
 	if flgs.Command != "" {
 		conf.DefaultCommand = flgs.Command
 		if _, exist := conf.Commands[conf.DefaultCommand]; !exist {
-			errLog.Fatal(fmt.Errorf("command %s is not defined",
-				conf.DefaultCommand))
+			return fmt.Errorf("undefined command %s", conf.DefaultCommand)
 		}
 	}
-	if len(flgs.Limit) == 0 {
-		flgs.Limit[conf.DefaultEnvironment] = struct{}{}
-		log.Printf("running %s on default %s\n", conf.DefaultCommand,
-			conf.DefaultEnvironment)
-	} else {
-		lims := []string{}
-		for lim := range flgs.Limit {
-			lims = append(lims, string(lim))
-		}
-		tmp := strings.Join(lims, ", ")
-		log.Printf("running %s on %s\n", conf.DefaultCommand, tmp)
+	lims := []string{}
+	for lim := range flgs.Limit {
+		lims = append(lims, string(lim))
 	}
+	tmp := strings.Join(lims, ", ")
 
-	if _, exist := conf.Inventory["all"]; exist {
-		errLog.Fatal(errors.New("reserved keyword 'all' cannot be inventory name"))
+	if _, exist := inventory["all"]; exist {
+		return errors.New("reserved keyword 'all' cannot be inventory name")
 	}
 
 	// Remove any unnecessary inventory. All remaining defined inventory
 	// will be used.
 	if _, exist := flgs.Limit["all"]; !exist {
-		for invName := range conf.Inventory {
-			if _, exist := flgs.Limit[invName]; !exist {
-				delete(conf.Inventory, invName)
+		for ip, tags := range inventory {
+			var found bool
+			for _, t := range tags {
+				if _, exist := flgs.Limit[t]; exist {
+					found = true
+					break
+				}
+			}
+			if !found {
+				delete(inventory, ip)
 			}
 		}
 	}
 
 	// Validate all limits are defined in inventory (i.e. no silent failure
 	// on typos).
-	if len(flgs.Limit) > len(conf.Inventory) {
-		// TODO improve error message to specify which limits are
-		// undefined
-		log.Printf("limit: %+v\n", flgs.Limit)
-		log.Printf("inventory: %+v\n", conf.Inventory)
-		errLog.Fatal(errors.New("undefined limits"))
+	if len(flgs.Limit) == 0 {
+		fmt.Println("FLAGS", flgs.Limit)
+		return errors.New("missing limits")
 	}
+	if len(inventory) == 0 {
+		msg := fmt.Sprintf("limits not defined in inventory: ")
+		for l := range flgs.Limit {
+			msg += fmt.Sprintf("%s, ", l)
+		}
+		return errors.New(strings.TrimSuffix(msg, ", "))
+	}
+
+	log.Printf("running %s on %s\n", conf.DefaultCommand, tmp)
 
 	// Calculate a sha256 checksum on the provided directory (defaults to
 	// current directory).
 	log.Printf("calculating checksum\n")
 	chk, err := calcChecksum(flgs.Directory)
 	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "calc checksum"))
+		errLog.Fatal(fmt.Errorf("calc checksum: %w", err))
 	}
 
 	// Split into batches limited in size by the provided Serial flag.
-	batches, err := makeBatches(conf, flgs.Serial)
+	batches, err := makeBatches(conf, inventory, flgs.Serial)
 	if err != nil {
-		errLog.Fatal(errors.Wrap(err, "make batches"))
+		errLog.Fatal(fmt.Errorf("make batches: %w", err))
 	}
 	log.Printf("got batches: %v\n", batches)
 
@@ -157,7 +187,7 @@ func main() {
 	for i := 0; i < len(batches); i++ {
 		<-done
 	}
-	log.Println("success")
+	return nil
 }
 
 func runExecIfs(
@@ -228,7 +258,7 @@ func runExec(
 	cmds["checksum"] = &up.Cmd{Execs: []string{chk}}
 	ch := make(chan runResult, len(servers))
 	for _, server := range servers {
-		go run(ch, vars, cmds, cmd, chk, server, execIf)
+		go runCmd(ch, vars, cmds, cmd, chk, server, execIf)
 	}
 	var err error
 	pass := true
@@ -247,7 +277,7 @@ type runResult struct {
 	error error
 }
 
-func run(
+func runCmd(
 	ch chan<- runResult,
 	vars map[string]string,
 	cmds map[up.CmdName]*up.Cmd,
@@ -262,7 +292,7 @@ func run(
 	cmds["server"] = &up.Cmd{Execs: []string{server}}
 	cmd, err := substituteVariables(vars, cmds, cmd)
 	if err != nil {
-		err = errors.Wrap(err, "substitute")
+		err = fmt.Errorf("substitute: %w", err)
 		ch <- runResult{pass: false, error: err}
 		return
 	}
@@ -288,6 +318,7 @@ func run(
 func parseFlags() (flags, error) {
 	f := flag.NewFlagSet("flags", flag.ExitOnError)
 	upfile := f.String("u", "Upfile", "path to upfile")
+	inventory := f.String("i", "inventory.json", "path to inventory")
 	directory := f.String("d", ".", "directory for checksum")
 	limit := f.String("l", "", "limit to specific services")
 	serial := f.Int("n", 1, "how many of each type of server to operate on at a time")
@@ -311,7 +342,11 @@ func parseFlags() (flags, error) {
 		}
 	}
 	f.Parse(args)
-	lim := map[up.InvName]struct{}{}
+
+	if *limit == "" {
+		return flags{}, errors.New("limits not set, use -l")
+	}
+	lim := map[string]struct{}{}
 	lims := strings.Split(*limit, ",")
 	if len(lims) > 0 {
 		all := false
@@ -325,7 +360,7 @@ func parseFlags() (flags, error) {
 			return flags{}, errors.New("cannot use 'all' limit alongside others")
 		}
 		for _, service := range lims {
-			lim[up.InvName(service)] = struct{}{}
+			lim[service] = struct{}{}
 		}
 	}
 	extraVars := map[string]string{}
@@ -343,6 +378,7 @@ func parseFlags() (flags, error) {
 	flgs := flags{
 		Limit:     lim,
 		Upfile:    *upfile,
+		Inventory: *inventory,
 		Serial:    *serial,
 		Directory: *directory,
 		Command:   up.CmdName(cmd),
@@ -351,9 +387,13 @@ func parseFlags() (flags, error) {
 	return flgs, nil
 }
 
-func makeBatches(conf *up.Config, max int) (batch, error) {
+func makeBatches(
+	conf *up.Config,
+	inventory up.Inventory,
+	max int,
+) (batch, error) {
 	batches := batch{}
-	for invName, servers := range conf.Inventory {
+	for invName, servers := range inventory {
 		if max == 0 {
 			batches[invName] = [][]string{servers}
 			continue
@@ -405,20 +445,20 @@ func calcChecksum(dir string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", errors.Wrap(err, "walk filepath")
+		return "", fmt.Errorf("walk filepath: %w", err)
 	}
 	h := sha256.New()
 	for _, pth := range files {
 		fi, err := os.Open(pth)
 		if err != nil {
-			return "", errors.Wrap(err, "open file")
+			return "", fmt.Errorf("checksum: open file: %w", err)
 		}
 		if _, err = io.Copy(h, fi); err != nil {
 			fi.Close()
-			return "", errors.Wrap(err, "copy file")
+			return "", fmt.Errorf("checksum: copy: %w", err)
 		}
 		if err = fi.Close(); err != nil {
-			return "", errors.Wrap(err, "close file")
+			return "", fmt.Errorf("checksum: close: %w", err)
 		}
 	}
 	sum := h.Sum(nil)
