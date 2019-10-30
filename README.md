@@ -41,7 +41,7 @@ Up gives you access to 2 reserved, always-available variables in your commands:
 You can also use environment variables, like the following:
 
 ```bash
-user=dev up deploy -l production
+user=dev up -l production deploy
 ```
 
 Access that variable in your Upfile using `$user`.
@@ -107,7 +107,7 @@ environment, so you don't accidentally deploy to production.
 Using the example Upfile above, here's how we could deploy to staging:
 
 ```
-up deploy -l staging
+up -l staging deploy
 ```
 
 Since staging is the first defined inventory and deploy is the first defined
@@ -126,7 +126,7 @@ up -l staging,production
 To update 3 production servers concurrently and exit if any fail, we can run:
 
 ```
-up update -l production -n 3
+up -l production -n 3 update
 ```
 
 Run `up -h` for additional usage info.

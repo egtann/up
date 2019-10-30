@@ -140,6 +140,9 @@ Outer:
 		return fmt.Errorf("nothing to exec for %s", name)
 	}
 	t.Commands[name] = &cmd
+	if t.DefaultCommand == "" {
+		t.DefaultCommand = name
+	}
 	return t.nextControl(tkn)
 }
 

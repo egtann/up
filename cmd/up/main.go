@@ -69,8 +69,6 @@ func main() {
 }
 
 func run() error {
-	errLog := log.New(os.Stdout, "", log.Lshortfile)
-
 	flgs, err := parseFlags()
 	if err != nil {
 		return fmt.Errorf("parse flags: %w", err)
@@ -98,10 +96,10 @@ func run() error {
 		return fmt.Errorf("parse inventory: %w", err)
 	}
 
-	if flgs.Command != "" {
+	if flgs.Command != "" && flgs.Command != "-" {
 		conf.DefaultCommand = flgs.Command
 		if _, exist := conf.Commands[conf.DefaultCommand]; !exist {
-			return fmt.Errorf("undefined command %s", conf.DefaultCommand)
+			return fmt.Errorf("undefined command: %s", conf.DefaultCommand)
 		}
 	}
 	lims := []string{}
@@ -147,8 +145,12 @@ func run() error {
 	// Validate all limits are defined in inventory (i.e. no silent failure
 	// on typos).
 	if len(flgs.Limit) == 0 {
-		fmt.Println("FLAGS", flgs.Limit)
-		return errors.New("missing limits")
+		// Default the limit equal to the command name, which makes
+		//
+		// upgen my_app | up -
+		//
+		// work and otherwise simplifies its use.
+		flgs.Limit[string(conf.DefaultCommand)] = struct{}{}
 	}
 	if len(inventory) == 0 {
 		msg := fmt.Sprintf("limits not defined in inventory: ")
@@ -165,18 +167,20 @@ func run() error {
 	log.Printf("calculating checksum\n")
 	chk, err := calcChecksum(flgs.Directory)
 	if err != nil {
-		errLog.Fatal(fmt.Errorf("calc checksum: %w", err))
+		return fmt.Errorf("calc checksum: %w", err)
 	}
 
 	// Split into batches limited in size by the provided Serial flag.
 	batches, err := makeBatches(conf, inventory, flgs.Serial)
 	if err != nil {
-		errLog.Fatal(fmt.Errorf("make batches: %w", err))
+		return fmt.Errorf("make batches: %w", err)
 	}
 	log.Printf("got batches: %v\n", batches)
 
 	// For each batch, run the ExecIfs and run Execs if necessary.
-	done := make(chan bool, len(batches))
+	done := make(chan struct{}, len(batches))
+	crash := make(chan error)
+	defer close(crash)
 	for _, srvBatch := range batches {
 		go func(srvBatch [][]string) {
 			for _, srvGroup := range srvBatch {
@@ -187,18 +191,20 @@ func run() error {
 				for i := 0; i < len(srvGroup); i++ {
 					res := <-ch
 					if res.err != nil {
-						// Crash as soon as anything
-						// fails
-						errLog.Fatal(res.err)
-						os.Exit(1)
+						crash <- res.err
 					}
 				}
 			}
-			done <- true
+			done <- struct{}{}
 		}(srvBatch)
 	}
 	for i := 0; i < len(batches); i++ {
-		<-done
+		select {
+		case <-done:
+			// Keep going
+		case err := <-crash:
+			return err
+		}
 	}
 	return nil
 }
@@ -329,51 +335,30 @@ func runCmd(
 
 // parseFlags and validate them.
 func parseFlags() (flags, error) {
-	f := flag.NewFlagSet("flags", flag.ExitOnError)
-	upfile := f.String("u", "Upfile", "path to upfile")
-	inventory := f.String("i", "inventory.json", "path to inventory")
-	directory := f.String("d", ".", "directory for checksum")
-	limit := f.String("l", "", "limit to specific services")
-	serial := f.Int("n", 1, "how many of each type of server to operate on at a time")
-	cmd := ""
-	args := os.Args
-	if len(args) == 2 {
-		cmd = os.Args[1]
-		if strings.HasPrefix(cmd, "-") {
-			cmd = ""
-			args = args[1:]
-		} else {
-			args = args[2:]
-		}
-	} else if len(args) > 2 {
-		cmd = os.Args[1]
-		if strings.HasPrefix(cmd, "-") {
-			cmd = ""
-			args = args[1:]
-		} else {
-			args = args[2:]
-		}
-	}
-	f.Parse(args)
+	upfile := flag.String("u", "Upfile", "path to upfile")
+	inventory := flag.String("i", "inventory.json", "path to inventory")
+	directory := flag.String("d", ".", "directory for checksum")
+	limit := flag.String("l", "", "limit to specific services")
+	serial := flag.Int("n", 1, "how many of each type of server to operate on at a time")
+	flag.Parse()
 
-	if *limit == "" {
-		return flags{}, errors.New("limits not set, use -l")
-	}
 	lim := map[string]struct{}{}
-	lims := strings.Split(*limit, ",")
-	if len(lims) > 0 {
-		all := false
-		for _, service := range lims {
-			if service == "all" {
-				lim["all"] = struct{}{}
-				all = true
+	if *limit != "" {
+		lims := strings.Split(*limit, ",")
+		if len(lims) > 0 {
+			all := false
+			for _, service := range lims {
+				if service == "all" {
+					lim["all"] = struct{}{}
+					all = true
+				}
 			}
-		}
-		if all && len(lims) > 1 {
-			return flags{}, errors.New("cannot use 'all' limit alongside others")
-		}
-		for _, service := range lims {
-			lim[service] = struct{}{}
+			if all && len(lims) > 1 {
+				return flags{}, errors.New("cannot use 'all' limit alongside others")
+			}
+			for _, service := range lims {
+				lim[service] = struct{}{}
+			}
 		}
 	}
 	extraVars := map[string]string{}
@@ -394,7 +379,7 @@ func parseFlags() (flags, error) {
 		Inventory: *inventory,
 		Serial:    *serial,
 		Directory: *directory,
-		Command:   up.CmdName(cmd),
+		Command:   up.CmdName(os.Args[len(os.Args)-1]),
 		Vars:      extraVars,
 	}
 	return flgs, nil
@@ -419,6 +404,7 @@ func makeBatches(
 		}
 	}
 
+	// Now create batches for each tag
 	for tag, ips := range invMap {
 		if max == 0 {
 			batches[tag] = [][]string{ips}
