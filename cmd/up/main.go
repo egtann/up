@@ -48,6 +48,9 @@ type flags struct {
 
 	// Vars passed into `up` at runtime to be used in start commands.
 	Vars map[string]string
+
+	// Stdin instructs `up` to read from stdin, achieved with `up -`.
+	Stdin bool
 }
 
 type batch map[string][][]string
@@ -74,16 +77,21 @@ func run() error {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
-	// Open and parse the Upfile
-	upFi, err := os.Open(flgs.Upfile)
-	if err != nil {
-		return fmt.Errorf("open upfile: %w", err)
+	var upFi io.ReadCloser
+	if flgs.Stdin {
+		upFi = os.Stdin
+	} else {
+		upFi, err := os.Open(flgs.Upfile)
+		if err != nil {
+			return fmt.Errorf("open upfile: %w", err)
+		}
+		defer upFi.Close()
 	}
-	defer upFi.Close()
 	conf, err := up.ParseUpfile(upFi)
 	if err != nil {
 		return fmt.Errorf("parse upfile: %w", err)
 	}
+	fmt.Printf("%+v\n", conf)
 
 	// Open and parse the inventory file
 	invFi, err := os.Open(flgs.Inventory)
@@ -110,6 +118,12 @@ func run() error {
 
 	if _, exist := inventory["all"]; exist {
 		return errors.New("reserved keyword 'all' cannot be inventory name")
+	}
+
+	// Default the limit equal to the command name, which makes the
+	// following work: `upgen my_app | up -`
+	if len(flgs.Limit) == 0 {
+		flgs.Limit[string(conf.DefaultCommand)] = struct{}{}
 	}
 
 	// Remove any unnecessary inventory. All remaining defined inventory
@@ -144,14 +158,6 @@ func run() error {
 
 	// Validate all limits are defined in inventory (i.e. no silent failure
 	// on typos).
-	if len(flgs.Limit) == 0 {
-		// Default the limit equal to the command name, which makes
-		//
-		// upgen my_app | up -
-		//
-		// work and otherwise simplifies its use.
-		flgs.Limit[string(conf.DefaultCommand)] = struct{}{}
-	}
 	if len(inventory) == 0 {
 		msg := fmt.Sprintf("limits not defined in inventory: ")
 		for l := range flgs.Limit {
@@ -373,14 +379,16 @@ func parseFlags() (flags, error) {
 		}
 		extraVars[vals[0]] = vals[1]
 	}
+	cmd := up.CmdName(os.Args[len(os.Args)-1])
 	flgs := flags{
 		Limit:     lim,
 		Upfile:    *upfile,
 		Inventory: *inventory,
 		Serial:    *serial,
 		Directory: *directory,
-		Command:   up.CmdName(os.Args[len(os.Args)-1]),
+		Command:   cmd,
 		Vars:      extraVars,
+		Stdin:     cmd == "-",
 	}
 	return flgs, nil
 }
