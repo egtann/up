@@ -131,6 +131,19 @@ func run() error {
 		}
 	}
 
+	// Remove any tags which are not in the limits, as we'll be ignoring
+	// those
+	for ip, tags := range inventory {
+		var newTags []string
+		for _, t := range tags {
+			if _, exist := flgs.Limit[t]; !exist {
+				continue
+			}
+			newTags = append(newTags, t)
+		}
+		inventory[ip] = newTags
+	}
+
 	// Validate all limits are defined in inventory (i.e. no silent failure
 	// on typos).
 	if len(flgs.Limit) == 0 {
@@ -393,17 +406,29 @@ func makeBatches(
 	max int,
 ) (batch, error) {
 	batches := batch{}
-	for invName, servers := range inventory {
+
+	// Organize by tags, rather than IPs for efficiency in this next
+	// operation
+	invMap := map[string][]string{}
+	for ip, tags := range inventory {
+		for _, tag := range tags {
+			if _, exist := invMap[tag]; !exist {
+				invMap[tag] = []string{}
+			}
+			invMap[tag] = append(invMap[tag], ip)
+		}
+	}
+
+	for tag, ips := range invMap {
 		if max == 0 {
-			batches[invName] = [][]string{servers}
+			batches[tag] = [][]string{ips}
 			continue
 		}
-		b := batches[invName]
-		b = [][]string{}
-		for _, srv := range servers {
-			b = appendToBatch(b, srv, max)
+		b := [][]string{}
+		for _, ip := range ips {
+			b = appendToBatch(b, ip, max)
 		}
-		batches[invName] = b
+		batches[tag] = b
 	}
 	if len(batches) == 0 {
 		return nil, errors.New("empty batches, nothing to do")
