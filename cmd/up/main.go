@@ -705,9 +705,6 @@ EXAMPLES
 		ssh $remote 'sudo service dashboard restart'
 		sleep 1 && $check_health
 
-	check_health
-		curl -s --max-time 1 $server/health
-
 	check_version
 		expr $CHECKSUM == "$(curl --max-time 1 $server/version)"
 
