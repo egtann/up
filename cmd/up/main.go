@@ -34,9 +34,9 @@ type flags struct {
 	// command in the Upfile.
 	Command up.CmdName
 
-	// Limit the changed services to those enumerated if the flag is
+	// Tags limits the changed services to those enumerated if the flag is
 	// provided. This holds the tags that will be used.
-	Limit map[string]struct{}
+	Tags map[string]struct{}
 
 	// Serial determines how many servers of the same type will be operated
 	// on at any one time. This defaults to 1. Use 0 to specify all of
@@ -58,9 +58,9 @@ type flags struct {
 	// except in the case of a failure where the full command is displayed.
 	Verbose bool
 
-	// Confirm instructs `up` to wait for input before moving onto the next
+	// Prompt instructs `up` to wait for input before moving onto the next
 	// batch.
-	Confirm bool
+	Prompt bool
 }
 
 type batch map[string][][]string
@@ -84,7 +84,7 @@ func main() {
 func run() error {
 	flgs, err := parseFlags()
 	if err != nil {
-		return fmt.Errorf("parse flags: %w", err)
+		return usage(fmt.Errorf("parse flags: %w", err))
 	}
 
 	var upFi io.ReadCloser
@@ -113,14 +113,14 @@ func run() error {
 		return fmt.Errorf("parse inventory: %w", err)
 	}
 
-	if flgs.Command != "" && flgs.Command != "-" {
+	if flgs.Command != "" && flgs.Upfile != "-" {
 		conf.DefaultCommand = flgs.Command
 		if _, exist := conf.Commands[conf.DefaultCommand]; !exist {
 			return fmt.Errorf("undefined command: %s", conf.DefaultCommand)
 		}
 	}
 	lims := []string{}
-	for lim := range flgs.Limit {
+	for lim := range flgs.Tags {
 		lims = append(lims, string(lim))
 	}
 	tmp := strings.Join(lims, ", ")
@@ -132,19 +132,19 @@ func run() error {
 		return errors.New("reserved keyword 'all' cannot be inventory name")
 	}
 
-	// Default the limit equal to the command name, which makes the
+	// Default the tags equal to the command name, which makes the
 	// following work: `upgen my_app | up -`
-	if len(flgs.Limit) == 0 {
-		flgs.Limit[string(conf.DefaultCommand)] = struct{}{}
+	if len(flgs.Tags) == 0 {
+		flgs.Tags[string(conf.DefaultCommand)] = struct{}{}
 	}
 
 	// Remove any unnecessary inventory. All remaining defined inventory
 	// will be used.
-	if _, exist := flgs.Limit["all"]; !exist {
+	if _, exist := flgs.Tags["all"]; !exist {
 		for ip, tags := range inventory {
 			var found bool
 			for _, t := range tags {
-				if _, exist := flgs.Limit[t]; exist {
+				if _, exist := flgs.Tags[t]; exist {
 					found = true
 					break
 				}
@@ -155,12 +155,12 @@ func run() error {
 		}
 	}
 
-	// Remove any tags which are not in the limits, as we'll be ignoring
-	// those
+	// Remove any tags which are not in the provided flags, as we'll be
+	// ignoring those
 	for ip, tags := range inventory {
 		var newTags []string
 		for _, t := range tags {
-			if _, exist := flgs.Limit[t]; !exist {
+			if _, exist := flgs.Tags[t]; !exist {
 				continue
 			}
 			newTags = append(newTags, t)
@@ -168,11 +168,11 @@ func run() error {
 		inventory[ip] = newTags
 	}
 
-	// Validate all limits are defined in inventory (i.e. no silent failure
+	// Validate all tags are defined in inventory (i.e. no silent failure
 	// on typos).
 	if len(inventory) == 0 {
-		msg := fmt.Sprintf("limits not defined in inventory: ")
-		for l := range flgs.Limit {
+		msg := fmt.Sprintf("tags not defined in inventory: ")
+		for l := range flgs.Tags {
 			msg += fmt.Sprintf("%s, ", l)
 		}
 		return errors.New(strings.TrimSuffix(msg, ", "))
@@ -199,7 +199,7 @@ func run() error {
 	// before deploying each batch. Sends on the confirm channel will not
 	// block because it's pre-buffered for all batches.
 	confirm := make(chan struct{}, len(batches))
-	if flgs.Confirm {
+	if flgs.Prompt {
 		// We don't want to prompt for the first command -- just for
 		// every command after, so we send an initial confirmation now
 		confirm <- struct{}{}
@@ -235,7 +235,7 @@ func run() error {
 		}(srvBatch)
 
 		// If we're confirming the next one, prepare the prompt
-		if flgs.Confirm {
+		if flgs.Prompt {
 			if keepGoing := confirmPrompt(confirm); !keepGoing {
 				return nil
 			}
@@ -416,17 +416,22 @@ func parseFlags() (flags, error) {
 	var (
 		upfile    = flag.String("f", "Upfile", "path to upfile")
 		inventory = flag.String("i", "inventory.json", "path to inventory")
-		directory = flag.String("d", ".", "directory for checksum")
-		limit     = flag.String("l", "", "limit to specific services")
+		command   = flag.String("c", "", "command to run in upfile (use - to read from stdin)")
+		tags      = flag.String("t", "", "tags from inventory to run (defaults to the name of the command)")
 		serial    = flag.Int("n", 1, "how many of each type of server to operate on at a time")
-		confirm   = flag.Bool("c", false, "confirm before moving to the next batch")
+		directory = flag.String("d", ".", "directory for checksum")
+		prompt    = flag.Bool("p", false, "prompt before moving to the next batch")
 		verbose   = flag.Bool("v", false, "verbose logs full commands")
 	)
 	flag.Parse()
 
+	if *command == "" && *upfile != "-" {
+		return flags{}, errors.New("missing command")
+	}
+
 	lim := map[string]struct{}{}
-	if *limit != "" {
-		lims := strings.Split(*limit, ",")
+	if *tags != "" {
+		lims := strings.Split(*tags, ",")
 		if len(lims) > 0 {
 			all := false
 			for _, service := range lims {
@@ -436,7 +441,7 @@ func parseFlags() (flags, error) {
 				}
 			}
 			if all && len(lims) > 1 {
-				return flags{}, errors.New("cannot use 'all' limit alongside others")
+				return flags{}, errors.New("cannot use 'all' tag alongside others")
 			}
 			for _, service := range lims {
 				lim[service] = struct{}{}
@@ -455,25 +460,17 @@ func parseFlags() (flags, error) {
 		}
 		extraVars[vals[0]] = vals[1]
 	}
-
-	// Don't consider a flag as our command
-	cmdName := os.Args[len(os.Args)-1]
-	if strings.HasPrefix(cmdName, "-") || cmdName == "up" {
-		cmdName = ""
-	}
-	cmd := up.CmdName(cmdName)
-
 	flgs := flags{
-		Limit:     lim,
+		Tags:      lim,
 		Upfile:    *upfile,
 		Inventory: *inventory,
 		Serial:    *serial,
 		Directory: *directory,
-		Command:   cmd,
+		Command:   up.CmdName(*command),
 		Vars:      extraVars,
-		Stdin:     cmd == "-",
+		Stdin:     *upfile == "-",
 		Verbose:   *verbose,
-		Confirm:   *confirm,
+		Prompt:    *prompt,
 	}
 	return flgs, nil
 }
@@ -623,4 +620,123 @@ func copyCommands(m1 map[up.CmdName]*up.Cmd) map[up.CmdName]*up.Cmd {
 		m2[k] = v
 	}
 	return m2
+}
+
+// usage prints usage instructions. It passes through any error to be sent to
+// Stderr by main().
+func usage(err error) error {
+	fmt.Println(`USAGE
+	up -c <cmd> [options...]
+	up -f -     [options...]
+
+OPTIONS
+	[-c] command to run in upfile
+	[-f] path to Upfile, default "Upfile" or use "-" to read from stdin
+	[-h] short-form help with flags
+	[-i] path to inventory, default "inventory.json"
+	[-n] number of servers to execute in parallel, default 1
+	[-p] prompt before moving to next batch, default false
+	[-t] comma-separated tags from inventory to execute, default is your command
+	[-v] verbose output, default false
+
+UPFILE
+	Upfiles define the steps to be run for each server using a syntax
+	similar to Makefiles.
+
+	There are 4 parts to Upfiles:
+
+	1. Command name: This is passed into up using "-c"
+	2. Conditionals: Before running commands, up will execute
+	   space-separated conditionals in order. It will proceed to run
+	   commands for the server if and only if any of the conditionals
+	   return a non-zero exit code. Conditionals are optional.
+	3. Commands: One or more commands to be run if all conditionals pass.
+	4. Variables: Variables can be substituted within commands by prefixing
+	   the name with "$". Variable substitution values may be a single
+	   value or an entire series of commands.
+
+	These parts are generally arranged as follows:
+
+	CMD_NAME_1 CONDITIONAL_1 CONDITIONAL_2
+		CMD_1
+		CMD_2
+
+	CMD_NAME_2
+		CMD_3
+		$VARIABLE_1
+
+	CONDITIONAL_1
+		CMD_4
+
+	VARIABLE_1
+		SUBSTITUTION_VALUE
+
+INVENTORY
+	The inventory is a JSON file which maps IP addresses to arbitrary tags.
+	It has the following format:
+
+	{
+		"IP_1": ["TAG_1", "TAG_2"],
+		"IP_2": ["TAG_1"]
+	}
+
+	Because this is a simple JSON file, your inventory can be dynamically
+	generated if you wish based on the state of your architecture at a
+	given moment, or you can commit the single into source code alongside
+	your Upfile.
+
+EXIT STATUS
+	up exits with 0 on success or 1 on any failure.
+
+EXAMPLES
+	In the following example Upfile, "deploy_dashboard" is the command.
+	Before running the script indented underneath the command, up will
+	first execute any space-separated commands to the right. In this
+	example, up will only execute if check_version returns a non-zero exit
+	code.
+
+	All steps are executed locally, so to run commands on the server we use
+	the reserved variable "$server" to get the IP and execute commands
+	through ssh.
+
+	$ cat Upfile
+	deploy_dashboard check_version
+		rsync -a dashboard $remote:
+		ssh $remote 'sudo service dashboard restart'
+		sleep 1 && $check_health
+
+	check_health
+		curl -s --max-time 1 $server/health
+
+	check_version
+		expr $CHECKSUM == "$(curl --max-time 1 $server/version)"
+
+	remote
+		$UP_USER@$server
+
+	$ cat inventory.json
+	{
+		"10.0.0.1": ["dashboard", "redis", "openbsd"]
+		"10.0.0.2": ["dashboard", "openbsd"]
+		"10.0.0.3": ["dashboard_staging"],
+		"10.0.0.4": ["postgres", "debian"],
+		"10.0.0.5": ["reverse_proxy"]
+	}
+
+	Good inventory tags are generally the type of services running on the
+	box and the operating system (for easily updating groups of machines
+	with the same OS).
+
+	In this example, running:
+
+	$ up -c deploy_dashboard -t dashboard
+
+	would execute deploy_dashboard on 10.0.0.1 and 10.0.0.2. Since we
+	didn't pass in "-n 2", up will deploy on the first server before
+	continuing to the next.
+
+AUTHORS
+	up was written by Evan Tann <up@evantann.com>.`)
+
+	return err
 }
