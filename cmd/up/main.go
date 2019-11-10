@@ -692,8 +692,8 @@ EXAMPLES
 	In the following example Upfile, "deploy_dashboard" is the command.
 	Before running the script indented underneath the command, up will
 	first execute any space-separated commands to the right. In this
-	example, up will only execute if check_version returns a non-zero exit
-	code.
+	example, up will only execute the deploy_dashboard commands if
+	check_version returns a non-zero exit code.
 
 	All steps are executed locally, so to run commands on the server we use
 	the reserved variable "$server" to get the IP and execute commands
