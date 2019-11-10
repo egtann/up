@@ -420,8 +420,8 @@ func parseFlags() (flags, error) {
 		tags      = flag.String("t", "", "tags from inventory to run (defaults to the name of the command)")
 		serial    = flag.Int("n", 1, "how many of each type of server to operate on at a time")
 		directory = flag.String("d", ".", "directory for checksum")
-		prompt    = flag.Bool("p", false, "prompt before moving to the next batch")
-		verbose   = flag.Bool("v", false, "verbose logs full commands")
+		prompt    = flag.Bool("p", false, "prompt before moving to the next batch (default false)")
+		verbose   = flag.Bool("v", false, "verbose logs full commands (default false)")
 	)
 	flag.Parse()
 
