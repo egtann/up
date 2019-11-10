@@ -720,9 +720,9 @@ EXAMPLES
 		"10.0.0.5": ["reverse_proxy"]
 	}
 
-	Good inventory tags are generally the type of services running on the
-	box and the operating system (for easily updating groups of machines
-	with the same OS).
+	Good inventory tags generally include the type of services running on
+	the box and the operating system (for easily updating groups of
+	machines with the same OS).
 
 	In this example, running:
 
