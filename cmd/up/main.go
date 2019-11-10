@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -51,6 +52,15 @@ type flags struct {
 
 	// Stdin instructs `up` to read from stdin, achieved with `up -`.
 	Stdin bool
+
+	// Verbose will log full commands, even when they're very log. By
+	// default `up` truncates commands to 80 characters when logging,
+	// except in the case of a failure where the full command is displayed.
+	Verbose bool
+
+	// Confirm instructs `up` to wait for input before moving onto the next
+	// batch.
+	Confirm bool
 }
 
 type batch map[string][][]string
@@ -81,7 +91,7 @@ func run() error {
 	if flgs.Stdin {
 		upFi = os.Stdin
 	} else {
-		upFi, err := os.Open(flgs.Upfile)
+		upFi, err = os.Open(flgs.Upfile)
 		if err != nil {
 			return fmt.Errorf("open upfile: %w", err)
 		}
@@ -91,7 +101,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse upfile: %w", err)
 	}
-	fmt.Printf("%+v\n", conf)
 
 	// Open and parse the inventory file
 	invFi, err := os.Open(flgs.Inventory)
@@ -115,6 +124,9 @@ func run() error {
 		lims = append(lims, string(lim))
 	}
 	tmp := strings.Join(lims, ", ")
+	if tmp == "" {
+		tmp = string(conf.DefaultCommand)
+	}
 
 	if _, exist := inventory["all"]; exist {
 		return errors.New("reserved keyword 'all' cannot be inventory name")
@@ -183,17 +195,35 @@ func run() error {
 	}
 	log.Printf("got batches: %v\n", batches)
 
+	// Prepare our channels to synchronize waiting for user confirmation
+	// before deploying each batch. Sends on the confirm channel will not
+	// block because it's pre-buffered for all batches.
+	confirm := make(chan struct{}, len(batches))
+	if flgs.Confirm {
+		// We don't want to prompt for the first command -- just for
+		// every command after, so we send an initial confirmation now
+		confirm <- struct{}{}
+	} else {
+		for i := 0; i < len(batches); i++ {
+			confirm <- struct{}{}
+		}
+	}
+
 	// For each batch, run the ExecIfs and run Execs if necessary.
 	done := make(chan struct{}, len(batches))
 	crash := make(chan error)
 	defer close(crash)
 	for _, srvBatch := range batches {
+		<-confirm
+
+		// We are good to go. Schedule the batch.
 		go func(srvBatch [][]string) {
 			for _, srvGroup := range srvBatch {
 				ch := make(chan result, len(srvGroup))
 				srvGroup = randomizeOrder(srvGroup)
 				cmd := conf.Commands[conf.DefaultCommand]
-				runExecIfs(ch, flgs.Vars, conf.Commands, cmd, chk, srvGroup)
+				runExecIfs(ch, flgs.Vars, conf.Commands, cmd,
+					chk, srvGroup, flgs.Verbose)
 				for i := 0; i < len(srvGroup); i++ {
 					res := <-ch
 					if res.err != nil {
@@ -203,6 +233,13 @@ func run() error {
 			}
 			done <- struct{}{}
 		}(srvBatch)
+
+		// If we're confirming the next one, prepare the prompt
+		if flgs.Confirm {
+			if keepGoing := confirmPrompt(confirm); !keepGoing {
+				return nil
+			}
+		}
 	}
 	for i := 0; i < len(batches); i++ {
 		select {
@@ -215,6 +252,31 @@ func run() error {
 	return nil
 }
 
+// confirmPrompt prompts the user and asks if up should continue.
+func confirmPrompt(confirm chan struct{}) bool {
+	var shouldContinue string
+	fmt.Printf("do you want to continue? [Y/n] ")
+
+	rdr := bufio.NewReader(os.Stdin)
+	shouldContinue, err := rdr.ReadString('\n')
+	if err != nil {
+		fmt.Printf("failed to read: %s\n", err)
+		return false
+	}
+	shouldContinue = strings.TrimSuffix(shouldContinue, "\n")
+	switch strings.ToLower(shouldContinue) {
+	case "y", "yes", "":
+		confirm <- struct{}{}
+		return true
+	case "n", "no":
+		fmt.Println("stopping up")
+		return false
+	default:
+		fmt.Printf("unknown input: %s\n", shouldContinue)
+		return confirmPrompt(confirm)
+	}
+}
+
 func runExecIfs(
 	ch chan result,
 	vars map[string]string,
@@ -222,6 +284,7 @@ func runExecIfs(
 	cmd *up.Cmd,
 	chk string,
 	servers []string,
+	verbose bool,
 ) {
 	send := func(ch chan<- result, err error, servers []string) {
 		for _, srv := range servers {
@@ -235,7 +298,8 @@ func runExecIfs(
 		cmds := copyCommands(cmds)
 		steps := cmds[execIf].Execs
 		for _, step := range steps {
-			ok, err := runExec(vars, cmds, step, chk, servers, true)
+			ok, err := runExec(vars, cmds, step, chk, servers,
+				true, verbose)
 			if err != nil {
 				send(ch, err, servers)
 				return
@@ -261,7 +325,8 @@ func runExecIfs(
 		// We may have substituted a variable with a multi-line command
 		cmdLines := strings.SplitN(cmdLine, "\n", -1)
 		for _, cmdLine := range cmdLines {
-			_, err = runExec(vars, cmds, cmdLine, chk, servers, false)
+			_, err = runExec(vars, cmds, cmdLine, chk, servers,
+				false, verbose)
 			if err != nil {
 				send(ch, err, servers)
 				return
@@ -277,13 +342,13 @@ func runExec(
 	cmds map[up.CmdName]*up.Cmd,
 	cmd, chk string,
 	servers []string,
-	execIf bool,
+	execIf, verbose bool,
 ) (bool, error) {
 	cmds = copyCommands(cmds)
 	cmds["checksum"] = &up.Cmd{Execs: []string{chk}}
 	ch := make(chan runResult, len(servers))
 	for _, server := range servers {
-		go runCmd(ch, vars, cmds, cmd, chk, server, execIf)
+		go runCmd(ch, vars, cmds, cmd, chk, server, execIf, verbose)
 	}
 	var err error
 	pass := true
@@ -307,7 +372,7 @@ func runCmd(
 	vars map[string]string,
 	cmds map[up.CmdName]*up.Cmd,
 	cmd, chk, server string,
-	execIf bool,
+	execIf, verbose bool,
 ) {
 	// TODO ensure that no cycles are present with depth-first
 	// search
@@ -322,7 +387,12 @@ func runCmd(
 		return
 	}
 
-	log.Printf("[%s] %s\n", server, cmd)
+	logLine := fmt.Sprintf("[%s] %s", server, cmd)
+	if !verbose && len(logLine) > 90 {
+		logLine = logLine[:87] + "..."
+	}
+	log.Printf("%s\n", logLine)
+
 	c := exec.Command("sh", "-c", cmd)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
@@ -333,6 +403,8 @@ func runCmd(
 			ch <- runResult{pass: false}
 			return
 		}
+
+		fmt.Println("error running command:", cmd)
 		ch <- runResult{pass: false, error: err}
 		return
 	}
@@ -341,11 +413,15 @@ func runCmd(
 
 // parseFlags and validate them.
 func parseFlags() (flags, error) {
-	upfile := flag.String("u", "Upfile", "path to upfile")
-	inventory := flag.String("i", "inventory.json", "path to inventory")
-	directory := flag.String("d", ".", "directory for checksum")
-	limit := flag.String("l", "", "limit to specific services")
-	serial := flag.Int("n", 1, "how many of each type of server to operate on at a time")
+	var (
+		upfile    = flag.String("f", "Upfile", "path to upfile")
+		inventory = flag.String("i", "inventory.json", "path to inventory")
+		directory = flag.String("d", ".", "directory for checksum")
+		limit     = flag.String("l", "", "limit to specific services")
+		serial    = flag.Int("n", 1, "how many of each type of server to operate on at a time")
+		confirm   = flag.Bool("c", false, "confirm before moving to the next batch")
+		verbose   = flag.Bool("v", false, "verbose logs full commands")
+	)
 	flag.Parse()
 
 	lim := map[string]struct{}{}
@@ -379,7 +455,14 @@ func parseFlags() (flags, error) {
 		}
 		extraVars[vals[0]] = vals[1]
 	}
-	cmd := up.CmdName(os.Args[len(os.Args)-1])
+
+	// Don't consider a flag as our command
+	cmdName := os.Args[len(os.Args)-1]
+	if strings.HasPrefix(cmdName, "-") || cmdName == "up" {
+		cmdName = ""
+	}
+	cmd := up.CmdName(cmdName)
+
 	flgs := flags{
 		Limit:     lim,
 		Upfile:    *upfile,
@@ -389,6 +472,8 @@ func parseFlags() (flags, error) {
 		Command:   cmd,
 		Vars:      extraVars,
 		Stdin:     cmd == "-",
+		Verbose:   *verbose,
+		Confirm:   *confirm,
 	}
 	return flgs, nil
 }
