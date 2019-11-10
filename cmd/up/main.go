@@ -426,7 +426,7 @@ func parseFlags() (flags, error) {
 	flag.Parse()
 
 	if *command == "" && *upfile != "-" {
-		return flags{}, errors.New("missing command")
+		return flags{}, errors.New("command is required")
 	}
 
 	lim := map[string]struct{}{}
@@ -733,7 +733,10 @@ EXAMPLES
 	continuing to the next.
 
 AUTHORS
-	up was written by Evan Tann <up@evantann.com>.`)
+	up was written by Evan Tann <up@evantann.com>.
+
+ERRORS`)
+	fmt.Printf("\t")
 
 	return err
 }
