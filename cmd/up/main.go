@@ -195,51 +195,38 @@ func run() error {
 	}
 	log.Printf("got batches: %v\n", batches)
 
-	// Prepare our channels to synchronize waiting for user confirmation
-	// before deploying each batch. Sends on the confirm channel will not
-	// block because it's pre-buffered for all batches.
-	confirm := make(chan struct{}, len(batches))
-	if flgs.Prompt {
-		// We don't want to prompt for the first command -- just for
-		// every command after, so we send an initial confirmation now
-		confirm <- struct{}{}
-	} else {
-		for i := 0; i < len(batches); i++ {
-			confirm <- struct{}{}
-		}
-	}
-
 	// For each batch, run the ExecIfs and run Execs if necessary.
 	done := make(chan struct{}, len(batches))
 	crash := make(chan error)
 	defer close(crash)
 	for _, srvBatch := range batches {
-		<-confirm
-
-		// We are good to go. Schedule the batch.
+		// Schedule our next batch to run
 		go func(srvBatch [][]string) {
-			for _, srvGroup := range srvBatch {
+			for i, srvGroup := range srvBatch {
 				ch := make(chan result, len(srvGroup))
 				srvGroup = randomizeOrder(srvGroup)
 				cmd := conf.Commands[conf.DefaultCommand]
 				runExecIfs(ch, flgs.Vars, conf.Commands, cmd,
 					chk, srvGroup, flgs.Verbose)
-				for i := 0; i < len(srvGroup); i++ {
+				for j := 0; j < len(srvGroup); j++ {
 					res := <-ch
 					if res.err != nil {
 						crash <- res.err
+						return
+					}
+				}
+
+				// We want to prompt to continue unless it's
+				// the last batch
+				if flgs.Prompt && i != len(srvBatch)-1 {
+					if err := confirmPrompt(srvGroup); err != nil {
+						crash <- err
+						return
 					}
 				}
 			}
 			done <- struct{}{}
 		}(srvBatch)
-
-		// If we're confirming the next one, prepare the prompt
-		if flgs.Prompt {
-			if keepGoing := confirmPrompt(confirm); !keepGoing {
-				return nil
-			}
-		}
 	}
 	for i := 0; i < len(batches); i++ {
 		select {
@@ -253,27 +240,25 @@ func run() error {
 }
 
 // confirmPrompt prompts the user and asks if up should continue.
-func confirmPrompt(confirm chan struct{}) bool {
+func confirmPrompt(ips []string) error {
 	var shouldContinue string
+	fmt.Println("done with", ips)
 	fmt.Printf("do you want to continue? [Y/n] ")
 
 	rdr := bufio.NewReader(os.Stdin)
 	shouldContinue, err := rdr.ReadString('\n')
 	if err != nil {
-		fmt.Printf("failed to read: %s\n", err)
-		return false
+		return fmt.Errorf("failed to read: %w", err)
 	}
 	shouldContinue = strings.TrimSuffix(shouldContinue, "\n")
 	switch strings.ToLower(shouldContinue) {
 	case "y", "yes", "":
-		confirm <- struct{}{}
-		return true
+		return nil
 	case "n", "no":
-		fmt.Println("stopping up")
-		return false
+		return errors.New("stopping up")
 	default:
 		fmt.Printf("unknown input: %s\n", shouldContinue)
-		return confirmPrompt(confirm)
+		return confirmPrompt(ips)
 	}
 }
 
