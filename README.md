@@ -8,7 +8,7 @@ and as a result, more reliable and less prone to bugs.
 ### Install
 
 ```
-$ go get -u github.com/egtann/up/cmd/up
+$ go get -u git.sr.ht/~egtann/up/cmd/up
 ```
 
 ### Usage
@@ -54,7 +54,7 @@ deploy check_health check_version
 	# your steps to compile and copy files to the remote server go here.
 	# If any of the following lines have non-zero exits, up immediately
 	# exits with status code 1.
-	go build -o myserver github.com/example/myserver
+	go build -o myserver git.sr.ht/example/myserver
 	rsync -chazP myserver $remote:
 	rm myserver
 	ssh $remote 'sudo service myserver restart'
