@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/egtann/up"
+	"git.sr.ht/~egtann/up"
 )
 
 type flags struct {

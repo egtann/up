@@ -5,7 +5,7 @@ import (
 	"log"
 	"testing"
 
-	"github.com/egtann/up"
+	"git.sr.ht/~egtann/up"
 )
 
 func TestMakeBatches(t *testing.T) {
